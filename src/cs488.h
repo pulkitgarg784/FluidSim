@@ -641,16 +641,58 @@ public:
 		// you do not need to implement clipping
 		// you may call the "shade" function to get the pixel value
 		// (you may ignore viewDir for now)
+		float2 pos[3];
 		for (int vert = 0; vert < 3; vert++) {
 			float4 triPos = float4(tri.positions[vert].x, tri.positions[vert].y, tri.positions[vert].z, 1.0f);
 			float4 p = mul(plm, triPos);
-			if (p.w > 0.0f) {
-				float3 p_ndc = float3(p.x, p.y, p.z) / p.w;
-				int i = (p_ndc.x + 1) * 0.5f * globalWidth;
-				int j = (p_ndc.y + 1) * 0.5f * globalHeight;
+			if (p.w <= 0.0f) return; // behind camera
+			
+			float3 p_ndc = float3(p.x, p.y, p.z) / p.w;
+			pos[vert].x = (p_ndc.x + 1.0f) * 0.5f * globalWidth;
+			pos[vert].y = (p_ndc.y + 1.0f) * 0.5f * globalHeight;
+		}
+
+		// Compute bounding box
+		int minX = std::max(0, (int)std::min({pos[0].x, pos[1].x, pos[2].x}));
+		int maxX = std::min(globalWidth - 1, (int)std::max({pos[0].x, pos[1].x, pos[2].x}));
+		int minY = std::max(0, (int)std::min({pos[0].y, pos[1].y, pos[2].y}));
+		int maxY = std::min(globalHeight - 1, (int)std::max({pos[0].y, pos[1].y, pos[2].y}));
+
+		float dX0 = pos[1].x - pos[0].x;
+		float dY0 = pos[1].y - pos[0].y;
+		float dX1 = pos[2].x - pos[1].x;
+		float dY1 = pos[2].y - pos[1].y;
+		float dX2 = pos[0].x - pos[2].x;
+		float dY2 = pos[0].y - pos[2].y;
+
+		// Tie-breaking edge rules
+		auto isTopLeft = [](float dX, float dY) {
+			return (dY < 0) || (dY == 0 && dX > 0);
+		};
+		bool tl0 = isTopLeft(dX0, dY0);
+		bool tl1 = isTopLeft(dX1, dY1);
+		bool tl2 = isTopLeft(dX2, dY2);
+
+		// Loop over the bounding box to fill in the triangle
+		for (int j = minY; j <= maxY; j++) {
+			for (int i = minX; i <= maxX; i++) {
+				float px = (float)i + 0.5f;
+				float py = (float)j + 0.5f;
 				
-				if (FrameBuffer.valid(i, j)) {
-					FrameBuffer.pixel(i, j) = float3(1.0f);
+				float L0 = -(px - pos[0].x) * dY0 + (py - pos[0].y) * dX0;
+				float L1 = -(px - pos[1].x) * dY1 + (py - pos[1].y) * dX1;
+				float L2 = -(px - pos[2].x) * dY2 + (py - pos[2].y) * dX2;
+
+				bool b0 = (L0 > 0 || (L0 == 0 && tl0));
+				bool b1 = (L1 > 0 || (L1 == 0 && tl1));
+				bool b2 = (L2 > 0 || (L2 == 0 && tl2));
+
+				bool b0_cw = (L0 < 0 || (L0 == 0 && !tl0));
+				bool b1_cw = (L1 < 0 || (L1 == 0 && !tl1));
+				bool b2_cw = (L2 < 0 || (L2 == 0 && !tl2));
+
+				if ((b0 && b1 && b2) || (b0_cw && b1_cw && b2_cw)) {
+					FrameBuffer.pixel(i, j) = materials[tri.idMaterial].Kd;
 				}
 			}
 		}
