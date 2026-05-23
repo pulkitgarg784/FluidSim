@@ -641,6 +641,19 @@ public:
 		// you do not need to implement clipping
 		// you may call the "shade" function to get the pixel value
 		// (you may ignore viewDir for now)
+		for (int vert = 0; vert < 3; vert++) {
+			float4 triPos = float4(tri.positions[vert].x, tri.positions[vert].y, tri.positions[vert].z, 1.0f);
+			float4 p = mul(plm, triPos);
+			if (p.w > 0.0f) {
+				float3 p_ndc = float3(p.x, p.y, p.z) / p.w;
+				int i = (p_ndc.x + 1) * 0.5f * globalWidth;
+				int j = (p_ndc.y + 1) * 0.5f * globalHeight;
+				
+				if (FrameBuffer.valid(i, j)) {
+					FrameBuffer.pixel(i, j) = float3(1.0f);
+				}
+			}
+		}
 	}
 
 
@@ -1585,7 +1598,9 @@ public:
 	void Rasterize() const {
 		// ====== implement it in A1 ======
 		// fill in plm by a proper matrix
-		float4x4 plm; // fill this in
+		float4x4 perspMatrix = perspectiveMatrix(globalFOV, globalAspectRatio, globalDepthMin, globalDepthMax);
+		float4x4 viewMatrix = lookatMatrix(globalEye, globalLookat, globalUp);
+		float4x4 plm = mul(perspMatrix, viewMatrix);
 
 		FrameBuffer.clear();
 		for (int n = 0, n_n = (int)objects.size(); n < n_n; n++) {
