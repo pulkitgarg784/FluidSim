@@ -634,6 +634,25 @@ public:
 		}
 	}
 
+	static bool PointOnRightSideOfLine(const float2& a, const float2& b, const float2& p) {
+		float2 ap = p - a;
+		float2 ab = b - a;
+		float2 abPerp = float2(-ab.y, ab.x);
+		float dotProd = dot(ap, abPerp);
+		
+		// Tie-breaking edge rule
+		bool isTopLeft = (ab.y < 0) || (ab.y == 0 && ab.x > 0);
+		return dotProd > 0.0f || (dotProd == 0.0f && isTopLeft);
+	}
+
+	static bool isInside(const float2& a, const float2& b, const float2& c, const float2& p) {
+		bool sideAB = PointOnRightSideOfLine(a, b, p);
+		bool sideBC = PointOnRightSideOfLine(b, c, p);
+		bool sideCA = PointOnRightSideOfLine(c, a, p);
+
+		return sideAB && sideBC && sideCA;
+	}
+
 	void rasterizeTriangle(const Triangle& tri, const float4x4& plm) const {
 		// ====== implement it in A1 ======
 		// rasterization of a triangle
@@ -658,40 +677,14 @@ public:
 		int minY = std::max(0, (int)std::min({pos[0].y, pos[1].y, pos[2].y}));
 		int maxY = std::min(globalHeight - 1, (int)std::max({pos[0].y, pos[1].y, pos[2].y}));
 
-		float dX0 = pos[1].x - pos[0].x;
-		float dY0 = pos[1].y - pos[0].y;
-		float dX1 = pos[2].x - pos[1].x;
-		float dY1 = pos[2].y - pos[1].y;
-		float dX2 = pos[0].x - pos[2].x;
-		float dY2 = pos[0].y - pos[2].y;
-
-		// Tie-breaking edge rules
-		auto isTopLeft = [](float dX, float dY) {
-			return (dY < 0) || (dY == 0 && dX > 0);
-		};
-		bool tl0 = isTopLeft(dX0, dY0);
-		bool tl1 = isTopLeft(dX1, dY1);
-		bool tl2 = isTopLeft(dX2, dY2);
-
 		// Loop over the bounding box to fill in the triangle
 		for (int j = minY; j <= maxY; j++) {
 			for (int i = minX; i <= maxX; i++) {
 				float px = (float)i + 0.5f;
 				float py = (float)j + 0.5f;
-				
-				float L0 = -(px - pos[0].x) * dY0 + (py - pos[0].y) * dX0;
-				float L1 = -(px - pos[1].x) * dY1 + (py - pos[1].y) * dX1;
-				float L2 = -(px - pos[2].x) * dY2 + (py - pos[2].y) * dX2;
+				float2 p = float2(px, py);
 
-				bool b0 = (L0 > 0 || (L0 == 0 && tl0));
-				bool b1 = (L1 > 0 || (L1 == 0 && tl1));
-				bool b2 = (L2 > 0 || (L2 == 0 && tl2));
-
-				bool b0_cw = (L0 < 0 || (L0 == 0 && !tl0));
-				bool b1_cw = (L1 < 0 || (L1 == 0 && !tl1));
-				bool b2_cw = (L2 < 0 || (L2 == 0 && !tl2));
-
-				if ((b0 && b1 && b2) || (b0_cw && b1_cw && b2_cw)) {
+				if (isInside(pos[0], pos[1], pos[2], p) && FrameBuffer.valid(i, j)) {
 					FrameBuffer.pixel(i, j) = materials[tri.idMaterial].Kd;
 				}
 			}
