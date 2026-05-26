@@ -643,14 +643,17 @@ public:
 		float areaBCP = SignedTriangleArea(b, c, p);
 		float areaCAP = SignedTriangleArea(c, a, p);
 
-		// Optionally can add tie-breaking rules, but this covers clockwise/counter-clockwise basic cases
-		// bool inTri = (areaABP >= 0.0f && areaBCP >= 0.0f && areaCAP >= 0.0f) ||
-		// 			 (areaABP <= 0.0f && areaBCP <= 0.0f && areaCAP <= 0.0f);
+		float areaSum = areaABP + areaBCP + areaCAP;
+		// Note: non-clockwise triangles are considered 'back-faces' and are ignored 
+		// Return false if CW visually or if it's perfectly degenerate (area==0) -> avoids NaN divide by 0 depth poisoning
+		if (areaSum <= 0.000001f) {
+			return false;
+		}
 
 		bool inTri = (areaABP >= 0.0f && areaBCP >= 0.0f && areaCAP >= 0.0f);
 
 		if (inTri) {
-			float invAreaSum = 1.0f / (areaABP + areaBCP + areaCAP);
+			float invAreaSum = 1.0f / areaSum;
 			weights.x = areaBCP * invAreaSum;
 			weights.y = areaCAP * invAreaSum;
 			weights.z = areaABP * invAreaSum;
@@ -666,7 +669,7 @@ public:
 		// you do not need to implement clipping
 		// you may call the "shade" function to get the pixel value
 		// (you may ignore viewDir for now)
-		float2 pos[3];
+		float3 pos[3];
 		for (int vert = 0; vert < 3; vert++) {
 			float4 triPos = float4(tri.positions[vert].x, tri.positions[vert].y, tri.positions[vert].z, 1.0f);
 			float4 p = mul(plm, triPos);
@@ -675,6 +678,7 @@ public:
 			float3 p_ndc = float3(p.x, p.y, p.z) / p.w;
 			pos[vert].x = (p_ndc.x + 1.0f) * 0.5f * globalWidth;
 			pos[vert].y = (p_ndc.y + 1.0f) * 0.5f * globalHeight;
+			pos[vert].z = p_ndc.z;
 		}
 
 		// Compute bounding box
@@ -691,8 +695,12 @@ public:
 				float2 p = float2(px, py);
 
 				float3 weights;
-				if (isInside(pos[0], pos[1], pos[2], p, weights) && FrameBuffer.valid(i, j)) {
-					FrameBuffer.pixel(i, j) = materials[tri.idMaterial].Kd;
+				if (isInside(float2(pos[0].x, pos[0].y), float2(pos[1].x, pos[1].y), float2(pos[2].x, pos[2].y), p, weights) && FrameBuffer.valid(i, j)) {
+					float interpolatedDepth = weights.x * pos[0].z + weights.y * pos[1].z + weights.z * pos[2].z;
+					if (interpolatedDepth < FrameBuffer.depth(i, j)) {
+						FrameBuffer.pixel(i, j) = materials[tri.idMaterial].Kd;
+						FrameBuffer.depth(i, j) = interpolatedDepth;
+					}
 				}
 			}
 		}
