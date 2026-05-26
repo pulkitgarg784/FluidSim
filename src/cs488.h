@@ -634,23 +634,29 @@ public:
 		}
 	}
 
-	static bool PointOnRightSideOfLine(const float2& a, const float2& b, const float2& p) {
-		float2 ap = p - a;
-		float2 ab = b - a;
-		float2 abPerp = float2(-ab.y, ab.x);
-		float dotProd = dot(ap, abPerp);
-		
-		// Tie-breaking edge rule
-		bool isTopLeft = (ab.y < 0) || (ab.y == 0 && ab.x > 0);
-		return dotProd > 0.0f || (dotProd == 0.0f && isTopLeft);
+	static float SignedTriangleArea(const float2& a, const float2& b, const float2& c) {
+		return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 	}
 
-	static bool isInside(const float2& a, const float2& b, const float2& c, const float2& p) {
-		bool sideAB = PointOnRightSideOfLine(a, b, p);
-		bool sideBC = PointOnRightSideOfLine(b, c, p);
-		bool sideCA = PointOnRightSideOfLine(c, a, p);
+	static bool isInside(const float2& a, const float2& b, const float2& c, const float2& p, float3& weights) {
+		float areaABP = SignedTriangleArea(a, b, p);
+		float areaBCP = SignedTriangleArea(b, c, p);
+		float areaCAP = SignedTriangleArea(c, a, p);
 
-		return sideAB && sideBC && sideCA;
+		// Optionally can add tie-breaking rules, but this covers clockwise/counter-clockwise basic cases
+		// bool inTri = (areaABP >= 0.0f && areaBCP >= 0.0f && areaCAP >= 0.0f) ||
+		// 			 (areaABP <= 0.0f && areaBCP <= 0.0f && areaCAP <= 0.0f);
+
+		bool inTri = (areaABP >= 0.0f && areaBCP >= 0.0f && areaCAP >= 0.0f);
+
+		if (inTri) {
+			float invAreaSum = 1.0f / (areaABP + areaBCP + areaCAP);
+			weights.x = areaBCP * invAreaSum;
+			weights.y = areaCAP * invAreaSum;
+			weights.z = areaABP * invAreaSum;
+		}
+
+		return inTri;
 	}
 
 	void rasterizeTriangle(const Triangle& tri, const float4x4& plm) const {
@@ -684,7 +690,8 @@ public:
 				float py = (float)j + 0.5f;
 				float2 p = float2(px, py);
 
-				if (isInside(pos[0], pos[1], pos[2], p) && FrameBuffer.valid(i, j)) {
+				float3 weights;
+				if (isInside(pos[0], pos[1], pos[2], p, weights) && FrameBuffer.valid(i, j)) {
 					FrameBuffer.pixel(i, j) = materials[tri.idMaterial].Kd;
 				}
 			}
