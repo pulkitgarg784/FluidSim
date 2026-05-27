@@ -644,8 +644,7 @@ public:
 		float areaCAP = SignedTriangleArea(c, a, p);
 
 		float areaSum = areaABP + areaBCP + areaCAP;
-		// Note: non-clockwise triangles are considered 'back-faces' and are ignored 
-		// Return false if CW visually or if it's perfectly degenerate (area==0) -> avoids NaN divide by 0 depth poisoning
+		// do not want 0. if area is 0, division by 0
 		if (areaSum <= 0.000001f) {
 			return false;
 		}
@@ -669,7 +668,7 @@ public:
 		// you do not need to implement clipping
 		// you may call the "shade" function to get the pixel value
 		// (you may ignore viewDir for now)
-		float3 pos[3];
+		float4 pos[3];
 		for (int vert = 0; vert < 3; vert++) {
 			float4 triPos = float4(tri.positions[vert].x, tri.positions[vert].y, tri.positions[vert].z, 1.0f);
 			float4 p = mul(plm, triPos);
@@ -679,6 +678,7 @@ public:
 			pos[vert].x = (p_ndc.x + 1.0f) * 0.5f * globalWidth;
 			pos[vert].y = (p_ndc.y + 1.0f) * 0.5f * globalHeight;
 			pos[vert].z = p_ndc.z;
+			pos[vert].w = p.w;
 		}
 
 		// Compute bounding box
@@ -698,8 +698,17 @@ public:
 				if (isInside(float2(pos[0].x, pos[0].y), float2(pos[1].x, pos[1].y), float2(pos[2].x, pos[2].y), p, weights) && FrameBuffer.valid(i, j)) {
 					float interpolatedDepth = weights.x * pos[0].z + weights.y * pos[1].z + weights.z * pos[2].z;
 					if (interpolatedDepth < FrameBuffer.depth(i, j)) {
-						FrameBuffer.pixel(i, j) = materials[tri.idMaterial].Kd;
 						FrameBuffer.depth(i, j) = interpolatedDepth;
+
+						float3 invW = float3(1.0f / pos[0].w, 1.0f / pos[1].w, 1.0f / pos[2].w);
+						float3 w = weights * invW;
+						float2 texcoord = (tri.texcoords[0] * w.x + tri.texcoords[1] * w.y + tri.texcoords[2] * w.z) / (w.x + w.y + w.z);
+
+						HitInfo tempHit;
+						tempHit.T = texcoord;
+						tempHit.material = &materials[tri.idMaterial];
+
+						FrameBuffer.pixel(i, j) = shade(tempHit, float3(0.0f, 0.0f, 1.0f), 0);
 					}
 				}
 			}
