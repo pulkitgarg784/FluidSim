@@ -4,6 +4,7 @@
 // =======================================
 #pragma once
 #include <cmath>
+#include <math.h>
 #define _CRT_SECURE_NO_WARNINGS
 #define NOMINMAX
 
@@ -45,7 +46,7 @@ constexpr float RadToDeg = 180.0f / PI;
 
 // for ray tracing
 constexpr float Epsilon = 5e-5f;
-
+constexpr int levelLimit = 5;
 // amount the camera moves with a mouse and a keyboard
 constexpr float ANGFACT = 0.2f;
 constexpr float SCLFACT = 0.1f;
@@ -1803,8 +1804,9 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
     // you may want to add shadow ray tracing here in A2
     float3 L = float3(0.0f);
     float3 brdf, irradiance;
-    // return hit.material->Kd; // comment out the rest of the block, and enable this to disable lights and shadows for task 3 demo
-    // loop over all of the point light sources
+    // return hit.material->Kd; // comment out the rest of the block, and enable
+    // this to disable lights and shadows for task 3 demo loop over all of the
+    // point light sources
     for (int i = 0; i < globalScene.pointLightSources.size(); i++) {
       float3 l = globalScene.pointLightSources[i]->position - hit.P;
 
@@ -1836,7 +1838,7 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
     }
     return L;
   } else if (hit.material->type == MAT_METAL) {
-    if (level >= 5) {
+    if (level >= levelLimit) {
       return float3(0.0f);
     }
 
@@ -1851,7 +1853,44 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
       return float3(0.0f);
     }
   } else if (hit.material->type == MAT_GLASS) {
-    return float3(0.0f); // replace this
+    if (level >= levelLimit) {
+      return float3(0.0f);
+    }
+
+    const float3 I = normalize(-viewDir);
+    float eta1 = 1.0f; // Assuming scene is in a vaccum.
+    float eta2 = hit.material->eta;
+    float3 n = hit.N;
+
+    if (dot(I, n) > 0.0f) {
+      n = -n;
+      eta1 = hit.material->eta;
+      eta2 = 1.0f;
+    }
+    const float eta = eta1 / eta2;
+    const float cosI = -dot(I, n);
+    const float k = 1.0f - eta * eta * (1.0f - cosI * cosI);
+
+    if (k < 0.0f) {
+      // total internal reflection
+      const float3 R = normalize(I - 2.0f * dot(I, n) * n);
+      Ray ray(hit.P + R * Epsilon, R);
+      HitInfo TIRHit;
+      if (globalScene.intersect(TIRHit, ray)) {
+        return shade(TIRHit, -R, level + 1);
+      }
+      return float3(0.0f);
+    } else {
+      // refraction
+      const float3 R = normalize(eta * I + (eta * cosI - sqrtf(k)) * n);
+      Ray ray(hit.P + R * Epsilon, R);
+      HitInfo refractHit;
+      if (globalScene.intersect(refractHit, ray)) {
+        return shade(refractHit, -R, level + 1);
+      }
+      return float3(0.0f);
+    }
+
   } else {
     // something went wrong - make it apparent that it is an error
     return float3(100.0f, 0.0f, 100.0f);
