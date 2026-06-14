@@ -716,7 +716,7 @@ public:
             tempHit.material = &materials[tri.idMaterial];
 
             FrameBuffer.pixel(i, j) =
-                shade(tempHit, float3(0.0f, 0.0f, 1.0f), 0);
+                shade(tempHit, normalize(globalEye - tempHit.P), 0);
           }
         }
       }
@@ -1803,7 +1803,7 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
     // you may want to add shadow ray tracing here in A2
     float3 L = float3(0.0f);
     float3 brdf, irradiance;
-
+    // return hit.material->Kd; // comment out the rest of the block, and enable this to disable lights and shadows for task 3 demo
     // loop over all of the point light sources
     for (int i = 0; i < globalScene.pointLightSources.size(); i++) {
       float3 l = globalScene.pointLightSources[i]->position - hit.P;
@@ -1836,7 +1836,20 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
     }
     return L;
   } else if (hit.material->type == MAT_METAL) {
-    return float3(0.0f); // replace this
+    if (level >= 5) {
+      return float3(0.0f);
+    }
+
+    float3 reflectionRayDir =
+        normalize(2.0f * dot(viewDir, hit.N) * hit.N - viewDir);
+    Ray reflectionRay(hit.P + hit.N * Epsilon, reflectionRayDir);
+    HitInfo reflectionHitInfo;
+
+    if (globalScene.intersect(reflectionHitInfo, reflectionRay)) {
+      return shade(reflectionHitInfo, -reflectionRayDir, level + 1);
+    } else {
+      return float3(0.0f);
+    }
   } else if (hit.material->type == MAT_GLASS) {
     return float3(0.0f); // replace this
   } else {
