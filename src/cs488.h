@@ -721,7 +721,42 @@ public:
 		// ray-triangle intersection
 		// fill in "result" when there is an intersection
 		// return true/false if there is an intersection or not
-		return false;
+
+
+		const float3 e1 = tri.positions[1] - tri.positions[0];
+		const float3 e2 = tri.positions[2] - tri.positions[0];
+		const float3 pvec = cross(ray.d, e2);
+		const float det = dot(e1, pvec);
+
+		if (linalg::abs(det) < Epsilon) {
+			return false;
+		}
+
+		const float invDet = 1.0f / det;
+		const float3 tvec = ray.o - tri.positions[0];
+		const float u = dot(tvec, pvec) * invDet;
+		if ((u < 0.0f) || (u > 1.0f)) {
+			return false;
+		}
+
+		const float3 qvec = cross(tvec, e1);
+		const float v = dot(ray.d, qvec) * invDet;
+		if ((v < 0.0f) || (u + v > 1.0f)) {
+			return false;
+		}
+
+		const float t = dot(e2, qvec) * invDet;
+		if ((t < tMin) || (t > tMax)) {
+			return false;
+		}
+
+		const float w = 1.0f - u - v;
+		result.t = t;
+		result.P = ray.o + t * ray.d;
+		result.N = normalize(w * tri.normals[0] + u * tri.normals[1] + v * tri.normals[2]);
+		result.T = w * tri.texcoords[0] + u * tri.texcoords[1] + v * tri.texcoords[2];
+		result.material = &materials[tri.idMaterial];
+		return true;
 	}
 
 
@@ -1910,5 +1945,4 @@ public:
 		}
 	}
 };
-
 

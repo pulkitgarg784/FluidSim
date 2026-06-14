@@ -71,8 +71,8 @@ static void A3(int argc, const char *argv[]) {
 
 int main(int argc, const char *argv[]) {
   // A0(argc, argv);
-  A1(argc, argv);
-  // A2(argc, argv);
+  // A1(argc, argv);
+  A2(argc, argv);
   // A3(argc, argv);
 
   CS488.start();
