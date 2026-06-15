@@ -39,7 +39,7 @@ static void setupScene(int argc, const char *argv[]) {
       printf("Making a single triangle instead.\n");
       mesh.createSingleTriangle();
     }
-    if(std::string(argv[2]) != ""){
+    if (argc > 2) {
       envMap.load(argv[2]);
     }
   } else {

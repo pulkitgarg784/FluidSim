@@ -738,7 +738,7 @@ public:
     const float3 pvec = cross(ray.d, e2);
     const float det = dot(e1, pvec);
 
-    if (linalg::abs(det) < Epsilon) {
+    if (linalg::abs(det) < 1e-12f) {
       return false;
     }
 
@@ -1801,6 +1801,11 @@ static Scene globalScene;
 static Image envMap;
 
 static float3 getEnvTexture(const float3 &dir) {
+  // no env map
+  if (envMap.width <= 0 || envMap.height <= 0 || envMap.pixels.empty()) {
+    return float3(0.0f);
+  }
+
   const float3 d = normalize(dir);
   const float dxy = sqrtf(d.x * d.x + d.y * d.y);
 
@@ -1828,6 +1833,7 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
     // you may want to add shadow ray tracing here in A2
     float3 L = float3(0.0f);
     float3 brdf, irradiance;
+    
     // return hit.material->Kd; // comment out the rest of the block, and enable
     // this to disable lights and shadows for task 3 demo loop over all of the
     // point light sources
@@ -1841,10 +1847,9 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
       l /= sqrtf(falloff);
 
       // create a ray
-      Ray shadowRay(hit.P + hit.N * Epsilon,
-                    l); // Offset ray along surface normal
+      Ray shadowRay(hit.P + hit.N * Epsilon, l); // Offset ray along surface normal
       HitInfo shadowHitinfo;
-      if (globalScene.intersect(shadowHitinfo, shadowRay, 0, sqrtf(falloff))) {
+      if (globalScene.intersect(shadowHitinfo, shadowRay, Epsilon, sqrtf(falloff))) {
         continue;
       }
 
@@ -1865,13 +1870,12 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
     if (level >= levelLimit) {
       return float3(0.0f);
     }
-
     float3 reflectionRayDir =
         normalize(2.0f * dot(viewDir, hit.N) * hit.N - viewDir);
     Ray reflectionRay(hit.P + hit.N * Epsilon, reflectionRayDir);
     HitInfo reflectionHitInfo;
 
-    if (globalScene.intersect(reflectionHitInfo, reflectionRay)) {
+    if (globalScene.intersect(reflectionHitInfo, reflectionRay, Epsilon)) {
       return shade(reflectionHitInfo, -reflectionRayDir, level + 1);
     } else {
       return getEnvTexture(reflectionRayDir);
@@ -1898,18 +1902,18 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
     if (k < 0.0f) {
       // total internal reflection
       const float3 R = normalize(I - 2.0f * dot(I, n) * n);
-      Ray ray(hit.P + R * Epsilon, R);
+      Ray ray(hit.P + n * Epsilon, R);
       HitInfo TIRHit;
-      if (globalScene.intersect(TIRHit, ray)) {
+      if (globalScene.intersect(TIRHit, ray, Epsilon)) {
         return shade(TIRHit, -R, level + 1);
       }
-      return float3(0.0f);
+      return getEnvTexture(R);
     } else {
       // refraction
       const float3 R = normalize(eta * I + (eta * cosI - sqrtf(k)) * n);
-      Ray ray(hit.P + R * Epsilon, R);
+      Ray ray(hit.P - n * Epsilon, R);
       HitInfo refractHit;
-      if (globalScene.intersect(refractHit, ray)) {
+      if (globalScene.intersect(refractHit, ray, Epsilon)) {
         return shade(refractHit, -R, level + 1);
       }
       return getEnvTexture(R);
