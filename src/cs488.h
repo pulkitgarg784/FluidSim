@@ -600,6 +600,8 @@ struct Triangle {
 // triangle mesh
 static float3 shade(const HitInfo &hit, const float3 &viewDir,
                     const int level = 0);
+static float3 getEnvTexture(const float3 &dir);
+
 class TriangleMesh {
 public:
   std::vector<Triangle> triangles;
@@ -1774,7 +1776,7 @@ public:
         if (intersect(hitInfo, ray)) {
           FrameBuffer.pixel(i, j) = shade(hitInfo, -ray.d);
         } else {
-          FrameBuffer.pixel(i, j) = float3(0.0f);
+          FrameBuffer.pixel(i, j) = getEnvTexture(ray.d);
         }
       }
 
@@ -1794,7 +1796,29 @@ public:
     }
   }
 };
+
 static Scene globalScene;
+static Image envMap;
+
+static float3 getEnvTexture(const float3 &dir) {
+  const float3 d = normalize(dir);
+  const float dxy = sqrtf(d.x * d.x + d.y * d.y);
+
+  float u, v;
+  if (dxy < Epsilon) {
+    u = 0.0f;
+    v = 0.0f;
+  } else {
+    const float r = acosf(std::max(-1.0f, std::min(1.0f, d.z))) / (PI * dxy);
+    u = d.x * r;
+    v = d.y * r;
+  }
+
+  const int x = std::min(envMap.width - 1, std::max(0, int((u + 1.0f) * 0.5f * envMap.width)));
+  const int y = std::min(envMap.height - 1, std::max(0, int((v + 1.0f) * 0.5f * envMap.height)));
+
+  return envMap.pixel(x, y);
+}
 
 // ====== implement it in A2 ======
 // fill in the missing parts
@@ -1850,7 +1874,7 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
     if (globalScene.intersect(reflectionHitInfo, reflectionRay)) {
       return shade(reflectionHitInfo, -reflectionRayDir, level + 1);
     } else {
-      return float3(0.0f);
+      return getEnvTexture(reflectionRayDir);
     }
   } else if (hit.material->type == MAT_GLASS) {
     if (level >= levelLimit) {
@@ -1888,7 +1912,7 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
       if (globalScene.intersect(refractHit, ray)) {
         return shade(refractHit, -R, level + 1);
       }
-      return float3(0.0f);
+      return getEnvTexture(R);
     }
 
   } else {

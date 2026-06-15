@@ -39,6 +39,9 @@ static void setupScene(int argc, const char *argv[]) {
       printf("Making a single triangle instead.\n");
       mesh.createSingleTriangle();
     }
+    if(std::string(argv[2]) != ""){
+      envMap.load(argv[2]);
+    }
   } else {
     printf("Specify .obj file in the command line arguments. Example: "
            "CS488.exe cornellbox.obj\n");
