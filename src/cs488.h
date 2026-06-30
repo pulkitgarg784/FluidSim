@@ -5,6 +5,7 @@
 #pragma once
 #include <cmath>
 #include <math.h>
+#include <algorithm>
 #define _CRT_SECURE_NO_WARNINGS
 #define NOMINMAX
 
@@ -636,11 +637,13 @@ public:
 
     float areaSum = areaABP + areaBCP + areaCAP;
     // do not want 0. if area is 0, division by 0
-    if (areaSum <= 0.000001f) {
+    if (fabsf(areaSum) <= 0.000001f) {
       return false;
     }
 
-    bool inTri = (areaABP >= 0.0f && areaBCP >= 0.0f && areaCAP >= 0.0f);
+    // use either winding order
+    bool inTri = (areaABP >= 0.0f && areaBCP >= 0.0f && areaCAP >= 0.0f) ||
+                 (areaABP <= 0.0f && areaBCP <= 0.0f && areaCAP <= 0.0f);
 
     if (inTri) {
       float invAreaSum = 1.0f / areaSum;
@@ -1561,10 +1564,9 @@ public:
 
   void step() {
     float3 temp = position;
-
-    // === fill in this part in A3 ===
-    // update the particle position and velocity here
-
+    float3 displacement = position - prevPosition;
+    position = position + displacement + globalGravity * (deltaT * deltaT);
+    velocity = (position - temp) / deltaT;
     prevPosition = temp;
   }
 };
@@ -1829,6 +1831,11 @@ static float3 getEnvTexture(const float3 &dir) {
 // fill in the missing parts
 static float3 shade(const HitInfo &hit, const float3 &viewDir,
                     const int level) {
+
+  if (globalEnableParticles && globalRenderType == RENDER_RASTERIZE) {
+    return hit.material->Kd;
+  }
+
   if (hit.material->type == MAT_LAMBERTIAN) {
     // you may want to add shadow ray tracing here in A2
     float3 L = float3(0.0f);
