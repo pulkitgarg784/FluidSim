@@ -1,0 +1,8 @@
+CompileFlags:
+  CompilationDatabase: build
+
+If:
+  PathMatch: '.*(gif\.h|stb_image\.h|stb_image_write\.h)'
+CompileFlags:
+  Remove: ['-std=gnu++14', '-std=c++*', '-std=gnu++*']
+  Add: ['-x', 'c', '-std=c17']
