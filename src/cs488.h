@@ -1567,21 +1567,31 @@ public:
     float3 displacement = position - prevPosition;
     position = position + displacement + globalGravity * (deltaT * deltaT);
     
-    // boudning box
-    const float boxMin = -0.5f;
-    const float boxMax = 0.5f;
-    const float cr = 1.0f; // no loss of energy
-    for(int axis = 0; axis < 3; axis++) {
-      float w;
-      if (position[axis] < boxMin) w = boxMin;
-      else if (position[axis] > boxMax) w = boxMax;
-      else continue;
+    // boudning box for task 2 START --------------
+    // const float boxMin = -0.5f;
+    // const float boxMax = 0.5f;
+    // const float cr = 1.0f; // no loss of energy
+    // for(int axis = 0; axis < 3; axis++) {
+    //   float w;
+    //   if (position[axis] < boxMin) w = boxMin;
+    //   else if (position[axis] > boxMax) w = boxMax;
+    //   else continue;
+    //
+    //   float a = temp[axis] - w;
+    //   float b = position[axis] - w;
+    //   position[axis] = w;
+    //   temp[axis] = w + cr * (b-a);
+    // }
+    // // Task 2 END -------------------------------
 
-      float a = temp[axis] - w;
-      float b = position[axis] - w;
-      position[axis] = w;
-      temp[axis] = w + cr * (b-a);
-    }
+    // Task 3
+    // Constrain by projecting the current position to nearest point on sphere
+    float3 sphereCenter(0,0,0);
+    float sphereRadius = 0.5f;
+    float3 d = position - sphereCenter;
+    float len = length(d);
+    if (len > Epsilon) position = sphereCenter + sphereRadius * (d/len);
+
 
     prevPosition = temp;
     velocity = (position - prevPosition) / deltaT;
