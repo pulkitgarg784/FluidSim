@@ -1566,8 +1566,25 @@ public:
     float3 temp = position;
     float3 displacement = position - prevPosition;
     position = position + displacement + globalGravity * (deltaT * deltaT);
-    velocity = (position - temp) / deltaT;
+    
+    // boudning box
+    const float boxMin = -0.5f;
+    const float boxMax = 0.5f;
+    const float cr = 1.0f; // no loss of energy
+    for(int axis = 0; axis < 3; axis++) {
+      float w;
+      if (position[axis] < boxMin) w = boxMin;
+      else if (position[axis] > boxMax) w = boxMax;
+      else continue;
+
+      float a = temp[axis] - w;
+      float b = position[axis] - w;
+      position[axis] = w;
+      temp[axis] = w + cr * (b-a);
+    }
+
     prevPosition = temp;
+    velocity = (position - prevPosition) / deltaT;
   }
 };
 
