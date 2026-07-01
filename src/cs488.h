@@ -3,9 +3,9 @@
 // (written by Toshiya Hachisuka)
 // =======================================
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <math.h>
-#include <algorithm>
 #define _CRT_SECURE_NO_WARNINGS
 #define NOMINMAX
 
@@ -66,6 +66,7 @@ const float globalDistanceToFilm =
 bool globalEnableParticles = false;
 constexpr float deltaT = 0.002f;
 constexpr float3 globalGravity = float3(0.0f, -9.8f, 0.0f);
+constexpr float globalGravityConst = 1.0f;
 constexpr int globalNumParticles = 300;
 
 // dynamic camera parameters
@@ -1552,46 +1553,66 @@ public:
   float3 position = float3(0.0f);
   float3 velocity = float3(0.0f);
   float3 prevPosition = position;
-
+  float mass = 2e-3f;
+  float3 force = float3(0.0f);
   void reset() {
     position =
         float3(PCG32::rand(), PCG32::rand(), PCG32::rand()) - float(0.5f);
     velocity =
         2.0f * float3((PCG32::rand() - 0.5f), 0.0f, (PCG32::rand() - 0.5f));
+   
+    // UNCOMMENT FOR TASK 4. This disables initial velcity, so gravity can be seen better
+    velocity = float3(0.0f);
     prevPosition = position;
     position += velocity * deltaT;
+    force = float3(0.0f);
   }
 
   void step() {
     float3 temp = position;
-    float3 displacement = position - prevPosition;
-    position = position + displacement + globalGravity * (deltaT * deltaT);
+
+    // Task 1 START  ----------------------------------------
+    // NOTE: THIS IS DOWNWARDS GRAVITY. DISABLE THIS FOR TASK 4
+    // float3 displacement = position - prevPosition;
+    // position = position + displacement + globalGravity * (deltaT * deltaT);
+    // Task 1 END -------------------------------------------
     
-    // boudning box for task 2 START --------------
+
+    // Task 2 START --------------
     // const float boxMin = -0.5f;
     // const float boxMax = 0.5f;
     // const float cr = 1.0f; // no loss of energy
-    // for(int axis = 0; axis < 3; axis++) {
+    // for (int axis = 0; axis < 3; axis++) {
     //   float w;
-    //   if (position[axis] < boxMin) w = boxMin;
-    //   else if (position[axis] > boxMax) w = boxMax;
-    //   else continue;
+    //   if (position[axis] < boxMin)
+    //     w = boxMin;
+    //   else if (position[axis] > boxMax)
+    //     w = boxMax;
+    //   else
+    //     continue;
     //
     //   float a = temp[axis] - w;
     //   float b = position[axis] - w;
     //   position[axis] = w;
-    //   temp[axis] = w + cr * (b-a);
+    //   temp[axis] = w + cr * (b - a);
     // }
     // // Task 2 END -------------------------------
 
-    // Task 3
-    // Constrain by projecting the current position to nearest point on sphere
-    float3 sphereCenter(0,0,0);
-    float sphereRadius = 0.5f;
-    float3 d = position - sphereCenter;
-    float len = length(d);
-    if (len > Epsilon) position = sphereCenter + sphereRadius * (d/len);
 
+    // Task 3 START -------------------------------
+    // Constrain by projecting the current position to nearest point on sphere
+    // float3 sphereCenter(0, 0, 0);
+    // float sphereRadius = 0.5f;
+    // float3 d = position - sphereCenter;
+    // float len = length(d);
+    // if (len > Epsilon)
+    //   position = sphereCenter + sphereRadius * (d / len);
+    // Task 3 END -----------------------
+
+    // Task 4 START ------------------------------
+    float3 accel = force / mass;
+    position = position + (position - prevPosition) + accel * (deltaT * deltaT);
+    // Task 4 END ---------------------------------
 
     prevPosition = temp;
     velocity = (position - prevPosition) / deltaT;
@@ -1667,8 +1688,24 @@ public:
   }
 
   void step() {
-    // extend this in A3
     // add some particle-particle interaction here
+
+    // TASK 4 -------------------
+    for (int i = 0; i < globalNumParticles; i++) {
+      particles[i].force = float3(0.0f);
+      for (int j = 0; j < globalNumParticles; j++) {
+        if (i == j)
+          continue;
+        float3 r = particles[j].position - particles[i].position;
+        float dist = length(r) + 0.01f;
+        float inv3 = 1.0f / (dist * dist * dist);
+        float3 gravForce =
+            (globalGravityConst * particles[i].mass * particles[j].mass) * r *
+            inv3;
+        particles[i].force += gravForce;
+      }
+    }
+    // Task 4 END ----------------------
     // spherical particles can be implemented here
     for (int i = 0; i < globalNumParticles; i++) {
       particles[i].step();
@@ -1848,8 +1885,10 @@ static float3 getEnvTexture(const float3 &dir) {
     v = d.y * r;
   }
 
-  const int x = std::min(envMap.width - 1, std::max(0, int((u + 1.0f) * 0.5f * envMap.width)));
-  const int y = std::min(envMap.height - 1, std::max(0, int((v + 1.0f) * 0.5f * envMap.height)));
+  const int x = std::min(envMap.width - 1,
+                         std::max(0, int((u + 1.0f) * 0.5f * envMap.width)));
+  const int y = std::min(envMap.height - 1,
+                         std::max(0, int((v + 1.0f) * 0.5f * envMap.height)));
 
   return envMap.pixel(x, y);
 }
@@ -1867,7 +1906,7 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
     // you may want to add shadow ray tracing here in A2
     float3 L = float3(0.0f);
     float3 brdf, irradiance;
-    
+
     // return hit.material->Kd; // comment out the rest of the block, and enable
     // this to disable lights and shadows for task 3 demo loop over all of the
     // point light sources
@@ -1881,9 +1920,11 @@ static float3 shade(const HitInfo &hit, const float3 &viewDir,
       l /= sqrtf(falloff);
 
       // create a ray
-      Ray shadowRay(hit.P + hit.N * Epsilon, l); // Offset ray along surface normal
+      Ray shadowRay(hit.P + hit.N * Epsilon,
+                    l); // Offset ray along surface normal
       HitInfo shadowHitinfo;
-      if (globalScene.intersect(shadowHitinfo, shadowRay, Epsilon, sqrtf(falloff))) {
+      if (globalScene.intersect(shadowHitinfo, shadowRay, Epsilon,
+                                sqrtf(falloff))) {
         continue;
       }
 
