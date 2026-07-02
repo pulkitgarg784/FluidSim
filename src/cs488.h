@@ -68,6 +68,7 @@ constexpr float deltaT = 0.002f;
 constexpr float3 globalGravity = float3(0.0f, -9.8f, 0.0f);
 constexpr float globalGravityConst = 1.0f;
 constexpr int globalNumParticles = 150;
+constexpr float cr = 0.5f;
 
 // dynamic camera parameters
 float3 globalEye = float3(0.0f, 0.0f, 1.5f);
@@ -1581,7 +1582,6 @@ public:
     // Task 2 START --------------
     // const float boxMin = -0.5f;
     // const float boxMax = 0.5f;
-    // const float cr = 1.0f; // no loss of energy
     // for (int axis = 0; axis < 3; axis++) {
     //   float w;
     //   if (position[axis] < boxMin)
@@ -1706,10 +1706,45 @@ public:
     //   }
     // }
     // Task 4 END ----------------------
-    // spherical particles can be implemented here
+
     for (int i = 0; i < globalNumParticles; i++) {
       particles[i].step();
     }
+
+    // Task 5 START -----------------------------------------------------
+    if (sphereSize > 0.0f) {
+      const float dp = 2.0f * sphereSize;
+
+      for (int i = 0; i < globalNumParticles; i++) {
+        for (int j = i + 1; j < globalNumParticles; j++) {
+          float3 delta = particles[j].position - particles[i].position;
+          float d = length(delta);
+          if (d >= dp || d <= Epsilon)
+            continue;
+
+          float3 n = delta / d; // normal from i to j
+
+          // Response 
+          float3 push = 0.5f * (dp - d) * n;
+          particles[i].position -= push;
+          particles[i].prevPosition -= push;
+          particles[j].position += push;
+          particles[j].prevPosition += push;
+
+          // Normals for energy conservation
+          float ai = dot(particles[i].position - particles[i].prevPosition, n);
+          float aj = dot(particles[j].position - particles[j].prevPosition, n);
+
+          if (ai > aj) {
+            float k = 0.5f * (1.0f + cr);
+            particles[i].prevPosition += k * (ai - aj) * n;
+            particles[j].prevPosition += k * (aj - ai) * n;
+          }
+        }
+      }
+    }
+    // Task 5 END ----------------------------------------------------------
+
     updateMesh();
   }
 };
