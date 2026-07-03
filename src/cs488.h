@@ -67,7 +67,7 @@ bool globalEnableParticles = false;
 constexpr float deltaT = 0.002f;
 constexpr float3 globalGravity = float3(0.0f, -9.8f, 0.0f);
 constexpr float globalGravityConst = 1.0f;
-constexpr int globalNumParticles = 150;
+constexpr int globalNumParticles = 20;
 constexpr float cr = 0.5f;
 
 // dynamic camera parameters
@@ -111,6 +111,123 @@ static const std::string FSDrawSource = R"(
     }
 )";
 static const char *PFSDrawSource = FSDrawSource.c_str();
+
+// ============================================================================
+// GPU rasterization shaders (used by GPURasterizer / Scene::RasterizeGPU).
+// These replace the CPU scanline rasterizer: geometry is uploaded to a VBO and
+// the hardware pipeline (vertex + fragment shaders, hardware depth buffer)
+// performs the rasterization. GLSL 120 is used to stay compatible with the
+// legacy OpenGL 2.1 context created by OpenGLInit.
+// ============================================================================
+static const char *GPUMeshVSSource = R"(
+    #version 120
+
+    attribute vec3 aPos;    // vertex position (world space)
+    attribute vec3 aNormal; // vertex normal (world space)
+    attribute vec3 aKd;     // per-vertex diffuse reflectance
+    attribute vec2 aUV;     // texture coordinates
+
+    uniform mat4 uMVP;      // projection * view
+    uniform mat4 uLightMVP; // light-space projection * view (for shadows)
+
+    varying vec3 vPos;
+    varying vec3 vNormal;
+    varying vec3 vKd;
+    varying vec2 vUV;
+    varying vec4 vLightClip;
+
+    void main() {
+        vPos = aPos;
+        vNormal = aNormal;
+        vKd = aKd;
+        vUV = aUV;
+        vLightClip = uLightMVP * vec4(aPos, 1.0);
+        gl_Position = uMVP * vec4(aPos, 1.0);
+    }
+)";
+static const char *GPUMeshFSSource = R"(
+    #version 120
+
+    varying vec3 vPos;
+    varying vec3 vNormal;
+    varying vec3 vKd;
+    varying vec2 vUV;
+    varying vec4 vLightClip;
+
+    const float PI = 3.14159265358979;
+    const int MAX_LIGHTS = 8;
+
+    uniform int  uUnlit;                 // 1 -> output flat Kd (e.g. particles)
+    uniform int  uNumLights;
+    uniform vec3 uLightPos[MAX_LIGHTS];
+    uniform vec3 uWattage[MAX_LIGHTS];
+
+    uniform int       uHasTexture;       // 1 -> modulate Kd by uColorTex
+    uniform sampler2D uColorTex;
+
+    uniform int           uShadowEnabled; // 1 -> sample shadow map for light 0
+    uniform sampler2DShadow uShadowMap;
+
+    // 1.0 = fully lit, 0.0 = fully shadowed (for the first light source)
+    float shadowFactor() {
+        if (uShadowEnabled == 0) return 1.0;
+        vec3 proj = vLightClip.xyz / vLightClip.w;
+        proj = proj * 0.5 + 0.5; // NDC [-1,1] -> texture [0,1]
+        // Outside the light frustum: treat as lit to avoid hard artifacts.
+        if (proj.x < 0.0 || proj.x > 1.0 ||
+            proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0) {
+            return 1.0;
+        }
+        float bias = 0.0025;
+        return shadow2D(uShadowMap, vec3(proj.xy, proj.z - bias)).r;
+    }
+
+    void main() {
+        vec3 kd = vKd;
+        if (uHasTexture == 1) {
+            kd *= texture2D(uColorTex, vUV).rgb;
+        }
+
+        if (uUnlit == 1) {
+            gl_FragColor = vec4(kd, 1.0);
+            return;
+        }
+
+        // Lambertian shading matching the CPU shade():
+        //   irradiance = max(0, N.l) / (4*PI*r^2) * wattage
+        //   L         += shadow * irradiance * (Kd / PI)
+        vec3 N = normalize(vNormal);
+        vec3 brdf = kd / PI;
+        vec3 L = vec3(0.0);
+        float shadow = shadowFactor();
+        for (int i = 0; i < uNumLights; i++) {
+            vec3 l = uLightPos[i] - vPos;
+            float falloff = dot(l, l);
+            l /= sqrt(falloff);
+            float ndl = max(0.0, dot(N, l));
+            vec3 irradiance = uWattage[i] * (ndl / (4.0 * PI * falloff));
+            float sh = (i == 0) ? shadow : 1.0; // only light 0 is shadow-mapped
+            L += sh * irradiance * brdf;
+        }
+        gl_FragColor = vec4(L, 1.0);
+    }
+)";
+
+// Depth-only shaders used to render the shadow map from the light's viewpoint.
+static const char *GPUDepthVSSource = R"(
+    #version 120
+    attribute vec3 aPos;
+    uniform mat4 uLightMVP;
+    void main() {
+        gl_Position = uLightMVP * vec4(aPos, 1.0);
+    }
+)";
+static const char *GPUDepthFSSource = R"(
+    #version 120
+    void main() {
+        gl_FragColor = vec4(1.0); // color unused; depth is written automatically
+    }
+)";
 
 // fast random number generator based pcg32_fast
 #include <stdint.h>
@@ -403,6 +520,10 @@ public:
   unsigned char *texture = nullptr;
   int textureWidth = 0;
   int textureHeight = 0;
+
+  // lazily-created GPU texture handle (0 = not uploaded yet), used by
+  // GPURasterizer. mutable so it can be filled during a const render pass.
+  mutable GLuint glTexture = 0;
 
   Material() {};
   virtual ~Material() {};
@@ -1563,7 +1684,7 @@ public:
         2.0f * float3((PCG32::rand() - 0.5f), 0.0f, (PCG32::rand() - 0.5f));
    
     // UNCOMMENT FOR TASK 4. This disables initial velcity, so gravity can be seen better
-    // velocity = float3(0.0f);
+    velocity = float3(0.0f);
     prevPosition = position;
     position += velocity * deltaT;
     force = float3(0.0f);
@@ -1574,8 +1695,8 @@ public:
 
     // Task 1 START  ----------------------------------------
     // NOTE: THIS IS DOWNWARDS GRAVITY. DISABLE THIS FOR TASK 4
-    float3 displacement = position - prevPosition;
-    position = position + displacement + globalGravity * (deltaT * deltaT);
+    // float3 displacement = position - prevPosition;
+    // position = position + displacement + globalGravity * (deltaT * deltaT);
     // Task 1 END -------------------------------------------
     
 
@@ -1601,17 +1722,17 @@ public:
 
     // Task 3 START -------------------------------
     // Constrain by projecting the current position to nearest point on sphere
-    float3 sphereCenter(0, 0, 0);
-    float sphereRadius = 0.5f;
-    float3 d = position - sphereCenter;
-    float len = length(d);
-    if (len > Epsilon)
-      position = sphereCenter + sphereRadius * (d / len);
+    // float3 sphereCenter(0, 0, 0);
+    // float sphereRadius = 0.5f;
+    // float3 d = position - sphereCenter;
+    // float len = length(d);
+    // if (len > Epsilon)
+    //   position = sphereCenter + sphereRadius * (d / len);
     // Task 3 END -----------------------
 
     // Task 4 START ------------------------------
-    // float3 accel = force / mass;
-    // position = position + (position - prevPosition) + accel * (deltaT * deltaT);
+    float3 accel = force / mass;
+    position = position + (position - prevPosition) + accel * (deltaT * deltaT);
     // Task 4 END ---------------------------------
 
     prevPosition = temp;
@@ -1691,20 +1812,20 @@ public:
     // add some particle-particle interaction here
 
     // TASK 4 -------------------
-    // for (int i = 0; i < globalNumParticles; i++) {
-    //   particles[i].force = float3(0.0f);
-    //   for (int j = 0; j < globalNumParticles; j++) {
-    //     if (i == j)
-    //       continue;
-    //     float3 r = particles[j].position - particles[i].position;
-    //     float dist = length(r) + 0.01f;
-    //     float inv3 = 1.0f / (dist * dist * dist);
-    //     float3 gravForce =
-    //         (globalGravityConst * particles[i].mass * particles[j].mass) * r *
-    //         inv3;
-    //     particles[i].force += gravForce;
-    //   }
-    // }
+    for (int i = 0; i < globalNumParticles; i++) {
+      particles[i].force = float3(0.0f);
+      for (int j = 0; j < globalNumParticles; j++) {
+        if (i == j)
+          continue;
+        float3 r = particles[j].position - particles[i].position;
+        float dist = length(r) + 0.01f;
+        float inv3 = 1.0f / (dist * dist * dist);
+        float3 gravForce =
+            (globalGravityConst * particles[i].mass * particles[j].mass) * r *
+            inv3;
+        particles[i].force += gravForce;
+      }
+    }
     // Task 4 END ----------------------
 
     for (int i = 0; i < globalNumParticles; i++) {
@@ -1749,6 +1870,371 @@ public:
   }
 };
 static ParticleSystem globalParticleSystem;
+
+// ============================================================================
+// GPURasterizer
+// Uploads triangle geometry to a GPU vertex buffer and rasterizes it with the
+// hardware pipeline (vertex/fragment shaders + hardware depth buffer), instead
+// of the CPU scanline rasterizer in TriangleMesh::rasterizeTriangle.
+//
+// Interleaved vertex layout (per vertex): position(3) normal(3) Kd(3).
+// ============================================================================
+class GPURasterizer {
+public:
+  static constexpr int kMaxLights = 8;
+  static constexpr int kFloatsPerVertex = 11; // pos3 + normal3 + Kd3 + uv2
+  static constexpr int kShadowSize = 2048;
+
+  GLuint program = 0;      // main shading program
+  GLuint depthProgram = 0; // depth-only program for the shadow map
+  GLuint vbo = 0;
+  GLuint shadowFBO = 0;
+  GLuint shadowTex = 0;
+  GLuint whiteTex = 0; // 1x1 white fallback for untextured surfaces
+  bool initialized = false;
+
+  // main program locations
+  GLint aPos = -1, aNormal = -1, aKd = -1, aUV = -1;
+  GLint uMVP = -1, uLightMVP = -1, uUnlit = -1, uNumLights = -1;
+  GLint uLightPos = -1, uWattage = -1;
+  GLint uHasTexture = -1, uColorTex = -1, uShadowEnabled = -1, uShadowMap = -1;
+
+  // depth program locations
+  GLint depthAPos = -1, depthULightMVP = -1;
+
+  // per-texture draw range within the interleaved vertex buffer
+  struct Batch {
+    GLuint tex; // 0 -> untextured
+    int start;  // first vertex
+    int count;  // vertex count
+  };
+  // scratch reused each frame
+  std::vector<float> vertexData;
+  std::vector<Batch> batches;
+  struct Bucket {
+    GLuint tex;
+    std::vector<float> data;
+  };
+  std::vector<Bucket> buckets;
+
+  static GLuint compileShader(GLenum type, const char *src) {
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, nullptr);
+    glCompileShader(s);
+    GLint ok = GL_FALSE;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (ok != GL_TRUE) {
+      char log[2048];
+      GLsizei len = 0;
+      glGetShaderInfoLog(s, sizeof(log), &len, log);
+      std::cerr << "GPURasterizer shader compile error:\n"
+                << std::string(log, len) << std::endl;
+    }
+    return s;
+  }
+
+  static GLuint linkProgram(const char *vsSrc, const char *fsSrc) {
+    GLuint prog = glCreateProgram();
+    GLuint vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    GLuint fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+    if (linked != GL_TRUE) {
+      char log[2048];
+      GLsizei len = 0;
+      glGetProgramInfoLog(prog, sizeof(log), &len, log);
+      std::cerr << "GPURasterizer program link error:\n"
+                << std::string(log, len) << std::endl;
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return prog;
+  }
+
+  void initShadowMap() {
+    glGenTextures(1, &shadowTex);
+    glBindTexture(GL_TEXTURE_2D, shadowTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kShadowSize,
+                 kShadowSize, 0, GL_DEPTH_COMPONENT, GL_FLOAT, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    // hardware depth comparison so sampler2DShadow works (with PCF via LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE,
+                    GL_COMPARE_R_TO_TEXTURE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+
+    glGenFramebuffers(1, &shadowFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
+                           shadowTex, 0);
+    // depth-only: no color buffer
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+      std::cerr << "GPURasterizer: shadow FBO incomplete" << std::endl;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+  }
+
+  void init() {
+    if (initialized)
+      return;
+
+    program = linkProgram(GPUMeshVSSource, GPUMeshFSSource);
+    depthProgram = linkProgram(GPUDepthVSSource, GPUDepthFSSource);
+
+    aPos = glGetAttribLocation(program, "aPos");
+    aNormal = glGetAttribLocation(program, "aNormal");
+    aKd = glGetAttribLocation(program, "aKd");
+    aUV = glGetAttribLocation(program, "aUV");
+    uMVP = glGetUniformLocation(program, "uMVP");
+    uLightMVP = glGetUniformLocation(program, "uLightMVP");
+    uUnlit = glGetUniformLocation(program, "uUnlit");
+    uNumLights = glGetUniformLocation(program, "uNumLights");
+    uLightPos = glGetUniformLocation(program, "uLightPos");
+    uWattage = glGetUniformLocation(program, "uWattage");
+    uHasTexture = glGetUniformLocation(program, "uHasTexture");
+    uColorTex = glGetUniformLocation(program, "uColorTex");
+    uShadowEnabled = glGetUniformLocation(program, "uShadowEnabled");
+    uShadowMap = glGetUniformLocation(program, "uShadowMap");
+
+    depthAPos = glGetAttribLocation(depthProgram, "aPos");
+    depthULightMVP = glGetUniformLocation(depthProgram, "uLightMVP");
+
+    glGenBuffers(1, &vbo);
+    initShadowMap();
+
+    // 1x1 white fallback texture. Bound to unit 0 for untextured surfaces so
+    // the color sampler always has a complete, loadable texture (avoids macOS
+    // "texture unloadable" warnings) while leaving Kd unmodified.
+    glGenTextures(1, &whiteTex);
+    glBindTexture(GL_TEXTURE_2D, whiteTex);
+    const unsigned char white[3] = {255, 255, 255};
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE,
+                 white);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    initialized = true;
+  }
+
+  // Lazily upload a material's texture to the GPU. Returns the GL texture id
+  // (0 when the material is untextured).
+  GLuint ensureTexture(const Material &mat) {
+    if (!mat.isTextured || mat.texture == nullptr || mat.textureWidth <= 0 ||
+        mat.textureHeight <= 0) {
+      return 0;
+    }
+    if (mat.glTexture != 0) {
+      return mat.glTexture;
+    }
+    GLuint id = 0;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1); // rows are tightly packed RGB
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, mat.textureWidth, mat.textureHeight,
+                 0, GL_RGB, GL_UNSIGNED_BYTE, mat.texture);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    mat.glTexture = id;
+    return id;
+  }
+
+  // Append one triangle's three vertices to the given buffer.
+  static void appendTriangle(std::vector<float> &out, const Triangle &tri,
+                             const Material &mat) {
+    for (int v = 0; v < 3; v++) {
+      const float3 &p = tri.positions[v];
+      const float3 &n = tri.normals[v];
+      const float3 &kd = mat.Kd;
+      const float2 &uv = tri.texcoords[v];
+      out.push_back(p.x);
+      out.push_back(p.y);
+      out.push_back(p.z);
+      out.push_back(n.x);
+      out.push_back(n.y);
+      out.push_back(n.z);
+      out.push_back(kd.x);
+      out.push_back(kd.y);
+      out.push_back(kd.z);
+      out.push_back(uv.x);
+      out.push_back(uv.y);
+    }
+  }
+
+  Bucket &bucketFor(GLuint tex) {
+    for (auto &b : buckets) {
+      if (b.tex == tex)
+        return b;
+    }
+    buckets.push_back(Bucket{tex, {}});
+    return buckets.back();
+  }
+
+  // Rasterize all objects on the GPU. Draws directly to the currently bound
+  // (default/screen) framebuffer. lightMVP is the light-space view-projection
+  // used for shadow mapping; shadowEnabled toggles the shadow pass.
+  void render(const std::vector<TriangleMesh *> &objects, const float4x4 &mvp,
+              const float4x4 &lightMVP,
+              const std::vector<PointLightSource *> &lights, bool unlit,
+              bool shadowEnabled) {
+    init();
+
+    // Bucket geometry by texture so each texture is one contiguous draw range.
+    for (auto &b : buckets)
+      b.data.clear();
+    for (size_t n = 0; n < objects.size(); n++) {
+      const TriangleMesh *obj = objects[n];
+      for (size_t k = 0; k < obj->triangles.size(); k++) {
+        const Triangle &tri = obj->triangles[k];
+        const Material &mat = obj->materials[tri.idMaterial];
+        GLuint tex = ensureTexture(mat);
+        appendTriangle(bucketFor(tex).data, tri, mat);
+      }
+    }
+
+    // Flatten buckets into one interleaved buffer and record draw ranges.
+    vertexData.clear();
+    batches.clear();
+    for (auto &b : buckets) {
+      if (b.data.empty())
+        continue;
+      const int startVertex = (int)(vertexData.size() / kFloatsPerVertex);
+      const int count = (int)(b.data.size() / kFloatsPerVertex);
+      vertexData.insert(vertexData.end(), b.data.begin(), b.data.end());
+      batches.push_back(Batch{b.tex, startVertex, count});
+    }
+    const int vertexCount = (int)(vertexData.size() / kFloatsPerVertex);
+
+    // Upload this frame's geometry.
+    if (vertexCount > 0) {
+      glBindBuffer(GL_ARRAY_BUFFER, vbo);
+      glBufferData(GL_ARRAY_BUFFER,
+                   (GLsizeiptr)(vertexData.size() * sizeof(float)),
+                   vertexData.data(), GL_DYNAMIC_DRAW);
+      glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+
+    const GLsizei stride = kFloatsPerVertex * sizeof(float);
+
+    // ---- Pass 1: render scene depth from the light's viewpoint ----
+    if (shadowEnabled && vertexCount > 0) {
+      glBindFramebuffer(GL_FRAMEBUFFER, shadowFBO);
+      glViewport(0, 0, kShadowSize, kShadowSize);
+      glClear(GL_DEPTH_BUFFER_BIT);
+      glEnable(GL_DEPTH_TEST);
+      glDepthFunc(GL_LESS);
+      // depth bias to combat shadow acne
+      glEnable(GL_POLYGON_OFFSET_FILL);
+      glPolygonOffset(2.0f, 4.0f);
+
+      glUseProgram(depthProgram);
+      glUniformMatrix4fv(depthULightMVP, 1, GL_FALSE, &lightMVP[0][0]);
+
+      glBindBuffer(GL_ARRAY_BUFFER, vbo);
+      glEnableVertexAttribArray(depthAPos);
+      glVertexAttribPointer(depthAPos, 3, GL_FLOAT, GL_FALSE, stride,
+                            (const void *)0);
+      glDrawArrays(GL_TRIANGLES, 0, vertexCount);
+      glDisableVertexAttribArray(depthAPos);
+      glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+      glDisable(GL_POLYGON_OFFSET_FILL);
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
+    // ---- Pass 2: shade the scene from the camera ----
+    // Use the true framebuffer size (in pixels). On HiDPI/Retina displays this
+    // is larger than the window size in screen points, so using globalWidth/
+    // Height here would only fill part of the window.
+    int fbW = globalWidth, fbH = globalHeight;
+    glfwGetFramebufferSize(globalGLFWindow, &fbW, &fbH);
+    glViewport(0, 0, fbW, fbH);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(program);
+    // linalg float4x4 is column-major -> transpose = GL_FALSE.
+    glUniformMatrix4fv(uMVP, 1, GL_FALSE, &mvp[0][0]);
+    glUniformMatrix4fv(uLightMVP, 1, GL_FALSE, &lightMVP[0][0]);
+
+    glUniform1i(uUnlit, unlit ? 1 : 0);
+    int numLights = std::min((int)lights.size(), kMaxLights);
+    glUniform1i(uNumLights, numLights);
+    if (numLights > 0) {
+      float lightPos[3 * kMaxLights];
+      float wattage[3 * kMaxLights];
+      for (int i = 0; i < numLights; i++) {
+        lightPos[3 * i + 0] = lights[i]->position.x;
+        lightPos[3 * i + 1] = lights[i]->position.y;
+        lightPos[3 * i + 2] = lights[i]->position.z;
+        wattage[3 * i + 0] = lights[i]->wattage.x;
+        wattage[3 * i + 1] = lights[i]->wattage.y;
+        wattage[3 * i + 2] = lights[i]->wattage.z;
+      }
+      glUniform3fv(uLightPos, numLights, lightPos);
+      glUniform3fv(uWattage, numLights, wattage);
+    }
+
+    glUniform1i(uShadowEnabled, shadowEnabled ? 1 : 0);
+    glUniform1i(uColorTex, 0); // color texture -> unit 0
+    glUniform1i(uShadowMap, 1); // shadow map    -> unit 1
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, shadowTex);
+
+    if (vertexCount > 0) {
+      glBindBuffer(GL_ARRAY_BUFFER, vbo);
+      glEnableVertexAttribArray(aPos);
+      glVertexAttribPointer(aPos, 3, GL_FLOAT, GL_FALSE, stride,
+                            (const void *)0);
+      glEnableVertexAttribArray(aNormal);
+      glVertexAttribPointer(aNormal, 3, GL_FLOAT, GL_FALSE, stride,
+                            (const void *)(3 * sizeof(float)));
+      glEnableVertexAttribArray(aKd);
+      glVertexAttribPointer(aKd, 3, GL_FLOAT, GL_FALSE, stride,
+                            (const void *)(6 * sizeof(float)));
+      glEnableVertexAttribArray(aUV);
+      glVertexAttribPointer(aUV, 2, GL_FLOAT, GL_FALSE, stride,
+                            (const void *)(9 * sizeof(float)));
+
+      for (const Batch &batch : batches) {
+        glUniform1i(uHasTexture, batch.tex != 0 ? 1 : 0);
+        glActiveTexture(GL_TEXTURE0);
+        // always bind a complete texture (real one, or the white fallback)
+        glBindTexture(GL_TEXTURE_2D, batch.tex != 0 ? batch.tex : whiteTex);
+        glDrawArrays(GL_TRIANGLES, batch.start, batch.count);
+      }
+
+      glDisableVertexAttribArray(aPos);
+      glDisableVertexAttribArray(aNormal);
+      glDisableVertexAttribArray(aKd);
+      glDisableVertexAttribArray(aUV);
+      glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+
+    // Restore state expected by the rest of the frame (blit path uses unit 0).
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    glDisable(GL_DEPTH_TEST);
+  }
+};
+static GPURasterizer globalGPURasterizer;
 
 // scene definition
 class Scene {
@@ -1842,6 +2328,64 @@ public:
         objects[n]->rasterizeTriangle(objects[n]->triangles[k], plm);
       }
     }
+  }
+
+  // GPU rasterizer
+  // Same camera/projection setup as Rasterize(), but the actual rasterization
+  // and shading run on the GPU (see GPURasterizer). Draws directly to the
+  // screen framebuffer rather than filling the CPU FrameBuffer.
+  void RasterizeGPU() const {
+    float4x4 perspMatrix = perspectiveMatrix(globalFOV, globalAspectRatio,
+                                             globalDepthMin, globalDepthMax);
+    float4x4 viewMatrix = lookatMatrix(globalEye, globalLookat, globalUp);
+    float4x4 plm = mul(perspMatrix, viewMatrix);
+
+    // Particles (A3): when a sphere mesh is provided they are real geometry
+    // with proper normals, so shade them like normal lit + shadowed surfaces.
+    // Otherwise (billboard particles) keep the original flat/unlit look.
+    const bool particlesLit =
+        globalEnableParticles && globalParticleSystem.sphereSize > 0.0f;
+    const bool unlit = globalEnableParticles && !particlesLit;
+
+    // Build a light-space view-projection matrix for shadow mapping. We fit a
+    // perspective frustum from the first light toward the scene's bounding-box
+    // center. Shadows are applied to the first light source only.
+    float4x4 lightMVP = linalg::identity;
+    bool shadowEnabled = false;
+    if (!unlit && !pointLightSources.empty() && !objects.empty()) {
+      float3 minp = objects[0]->bbox.get_minp();
+      float3 maxp = objects[0]->bbox.get_maxp();
+      for (size_t i = 1; i < objects.size(); i++) {
+        minp = linalg::min(minp, objects[i]->bbox.get_minp());
+        maxp = linalg::max(maxp, objects[i]->bbox.get_maxp());
+      }
+      const float3 center = 0.5f * (minp + maxp);
+      const float radius = std::max(1e-3f, 0.5f * length(maxp - minp));
+
+      const float3 lightPos = pointLightSources[0]->position;
+      const float3 toCenter = center - lightPos;
+      const float dist = std::max(1e-3f, length(toCenter));
+
+      // choose an up vector not parallel to the light direction
+      const float3 dir = toCenter / dist;
+      float3 up = float3(0.0f, 1.0f, 0.0f);
+      if (fabsf(dot(dir, up)) > 0.99f)
+        up = float3(1.0f, 0.0f, 0.0f);
+
+      // frustum wide enough to enclose the bounding sphere, plus margin
+      float fov = 2.0f * atanf(radius / dist) * RadToDeg * 1.2f;
+      fov = std::max(15.0f, std::min(150.0f, fov));
+      const float zNear = std::max(0.01f, dist - radius);
+      const float zFar = dist + radius;
+
+      const float4x4 lightView = lookatMatrix(lightPos, center, up);
+      const float4x4 lightProj = perspectiveMatrix(fov, 1.0f, zNear, zFar);
+      lightMVP = mul(lightProj, lightView);
+      shadowEnabled = true;
+    }
+
+    globalGPURasterizer.render(objects, plm, lightMVP, pointLightSources, unlit,
+                               shadowEnabled);
   }
 
   // eye ray generation (given to you for A2)
@@ -2145,13 +2689,24 @@ public:
         globalParticleSystem.step();
       }
 
+      bool gpuRasterized = false;
       if (globalRenderType == RENDER_RASTERIZE) {
-        globalScene.Rasterize();
+        // GPU rasterization: draws directly to the default (screen) framebuffer
+        // using the hardware pipeline + depth buffer.
+        globalScene.RasterizeGPU();
+        gpuRasterized = true;
       } else if (globalRenderType == RENDER_RAYTRACE) {
         globalScene.Raytrace();
       } else if (globalRenderType == RENDER_IMAGE) {
         if (process)
           process();
+      }
+
+      // For the GPU path the image lives in the framebuffer, not FrameBuffer.
+      // Read it back so recording keeps working.
+      if (gpuRasterized && globalRecording) {
+        glReadPixels(0, 0, globalWidth, globalHeight, GL_RGB, GL_FLOAT,
+                     &FrameBuffer.pixels[0][0]);
       }
 
       if (globalRecording) {
@@ -2174,10 +2729,18 @@ public:
         delete[] buf;
       }
 
-      // drawing the frame buffer via OpenGL (you don't need to touch this)
-      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, globalWidth, globalHeight, GL_RGB,
-                      GL_FLOAT, &FrameBuffer.pixels[0][0]);
-      glRecti(1, 1, -1, -1);
+      if (gpuRasterized) {
+        // Already drawn to the screen by RasterizeGPU(); nothing to blit.
+      } else {
+        // Draw the CPU FrameBuffer to the screen via the fullscreen blit pass.
+        glUseProgram(FSDraw);
+        glDisable(GL_DEPTH_TEST);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, GLFrameBufferTexture);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, globalWidth, globalHeight,
+                        GL_RGB, GL_FLOAT, &FrameBuffer.pixels[0][0]);
+        glRecti(1, 1, -1, -1);
+      }
       glfwSwapBuffers(globalGLFWindow);
       globalFrameCount++;
       PCG32::rand();
