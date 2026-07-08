@@ -67,7 +67,7 @@ bool globalEnableParticles = false;
 constexpr float deltaT = 0.002f;
 constexpr float3 globalGravity = float3(0.0f, -9.8f, 0.0f);
 constexpr float globalGravityConst = 1.0f;
-constexpr int globalNumParticles = 200;
+constexpr int globalNumParticles = 1000;
 constexpr float cr = 0.5f;
 
 // SPH parameters
@@ -76,6 +76,12 @@ constexpr float particleMass = 1.0f;    // mass used for density accumulation
 constexpr float collisionDamping =
     0.5f; // fraction of velocity kept on a wall bounce (1 = perfectly elastic)
 constexpr float3 boundsSize = float3(1.0f, 1.0f, 1.0f); // simulation box extents
+constexpr float targetDensity = 960.0f;    // rest density the fluid relaxes to
+constexpr float pressureMultiplier = 15.0f; // stiffness (pressure per density error)
+
+// particle visualization
+constexpr float particleRenderRadius = 0.01f; // visual radius of each circle
+constexpr int particleCircleSegments = 12;    // triangles per particle circle
 
 // dynamic camera parameters
 float3 globalEye = float3(0.0f, 0.0f, 1.5f);
@@ -1671,22 +1677,15 @@ public:
   float3 position = float3(0.0f);
   float3 velocity = float3(0.0f);
   float3 prevPosition = position;
+  float3 predictedPosition = float3(0.0f); // lookahead used for SPH sampling
   float mass = 2e-3f;
   float3 force = float3(0.0f);
-  float density = 0.0f;
   void reset() {
     position = float3(PCG32::rand() - 0.5f, PCG32::rand() - 0.5f, 0.0f);
     velocity = float3(0.0f);
     prevPosition = position;
+    predictedPosition = position;
     force = float3(0.0f);
-    density = 0.0f;
-  }
-
-  // itegrate gravity into the velocity, then set position
-  void step() {
-    velocity += globalGravity * deltaT;
-    position += velocity * deltaT;
-    resolveCollisions();
   }
 
   // flip velocity 
@@ -1704,6 +1703,8 @@ public:
 class ParticleSystem {
 public:
   std::vector<Particle> particles;
+  std::vector<float> densities;          // cached density per particle
+  std::vector<float> particleProperties; // arbitrary scalar field (demo)
   TriangleMesh particlesMesh;
   TriangleMesh sphere;
   const char *sphereMeshFilePath = 0;
@@ -1732,23 +1733,33 @@ public:
         }
       }
     } else {
-      const float particleSize = 0.005f;
+      // camera-facing filled circle (triangle fan) per particle
+      const int seg = particleCircleSegments;
+      const float r = particleRenderRadius;
       for (int i = 0; i < globalNumParticles; i++) {
-        // facing toward the camera
-        particlesMesh.triangles[i].positions[0] = particles[i].position;
-        particlesMesh.triangles[i].positions[1] =
-            particles[i].position + particleSize * globalUp;
-        particlesMesh.triangles[i].positions[2] =
-            particles[i].position + particleSize * globalRight;
-        particlesMesh.triangles[i].normals[0] = -globalViewDir;
-        particlesMesh.triangles[i].normals[1] = -globalViewDir;
-        particlesMesh.triangles[i].normals[2] = -globalViewDir;
+        const float3 c = particles[i].position;
+        for (int s = 0; s < seg; s++) {
+          float a0 = (2.0f * PI * s) / seg;
+          float a1 = (2.0f * PI * (s + 1)) / seg;
+          float3 p0 =
+              c + r * (std::cos(a0) * globalRight + std::sin(a0) * globalUp);
+          float3 p1 =
+              c + r * (std::cos(a1) * globalRight + std::sin(a1) * globalUp);
+          int t = i * seg + s;
+          particlesMesh.triangles[t].positions[0] = c;
+          particlesMesh.triangles[t].positions[1] = p0;
+          particlesMesh.triangles[t].positions[2] = p1;
+          particlesMesh.triangles[t].normals[0] = -globalViewDir;
+          particlesMesh.triangles[t].normals[1] = -globalViewDir;
+          particlesMesh.triangles[t].normals[2] = -globalViewDir;
       }
     }
   }
 
   void initialize() {
     particles.resize(globalNumParticles);
+    densities.resize(globalNumParticles, 0.0f);
+    particleProperties.resize(globalNumParticles, 0.0f);
     particlesMesh.materials.resize(1);
     for (int i = 0; i < globalNumParticles; i++) {
       particles[i].reset();
@@ -1761,27 +1772,65 @@ public:
         sphere.preCalc();
         sphereSize = sphere.bbox.get_size().x * 0.5f;
       } else {
-        particlesMesh.triangles.resize(globalNumParticles);
+        particlesMesh.triangles.resize(globalNumParticles *
+                                       particleCircleSegments);
       }
     } else {
-      particlesMesh.triangles.resize(globalNumParticles);
+      particlesMesh.triangles.resize(globalNumParticles *
+                                     particleCircleSegments);
     }
     updateMesh();
   }
 
   void step() {
-    // --- SPH step 1: compute the density at each particle ---
-    // (later steps will use this to derive pressure and pressure forces)
+    // 1. apply gravity, then predict where each particle will be next.
+    //    SPH quantities are sampled at these predicted positions, which
+    //    damps the jitter/blow-ups that explicit Euler otherwise produces.
     for (int i = 0; i < globalNumParticles; i++) {
-      particles[i].density = calculateDensity(particles[i].position);
+      particles[i].velocity += globalGravity * deltaT;
+      particles[i].predictedPosition =
+          particles[i].position + particles[i].velocity * deltaT;
+    }
+    updateDensities();
+
+    // 2. pressure force -> acceleration -> velocity
+    for (int i = 0; i < globalNumParticles; i++) {
+      float3 pressureForce = calculatePressureForce(i);
+      float3 pressureAcceleration = pressureForce / densities[i];
+      particles[i].velocity += pressureAcceleration * deltaT;
     }
 
-    // --- integrate: gravity affects velocity, velocity moves position ---
+    // 3. advance positions and resolve wall collisions
     for (int i = 0; i < globalNumParticles; i++) {
-      particles[i].step();
+      particles[i].position += particles[i].velocity * deltaT;
+      particles[i].resolveCollisions();
     }
 
     updateMesh();
+  }
+
+  // Recompute and cache the density of every particle, sampled at the
+  // predicted positions.
+  void updateDensities() {
+    for (int i = 0; i < globalNumParticles; i++) {
+      densities[i] = calculateDensity(particles[i].predictedPosition);
+    }
+
+    // DEBUG: report density stats on the first step and periodically after,
+    // so targetDensity / pressureMultiplier can be tuned from real numbers.
+    static int frame = 0;
+    if (frame % 500 == 0) {
+      float mn = densities[0], mx = densities[0], sum = 0.0f;
+      for (int i = 0; i < globalNumParticles; i++) {
+        mn = std::min(mn, densities[i]);
+        mx = std::max(mx, densities[i]);
+        sum += densities[i];
+      }
+      std::cout << "[density] frame " << frame << "  min=" << mn
+                << "  avg=" << (sum / globalNumParticles) << "  max=" << mx
+                << std::endl;
+    }
+    frame++;
   }
 
 
@@ -1797,11 +1846,82 @@ public:
   float calculateDensity(const float3 &samplePoint) const {
     float density = 0.0f;
     for (const Particle &p : particles) {
-      float dst = length(p.position - samplePoint);
+      float dst = length(p.predictedPosition - samplePoint);
       float influence = smoothingKernel(smoothingRadius, dst);
       density += particleMass * influence;
     }
     return density;
+  }
+
+  // Analytic derivative of smoothingKernel w.r.t. dst.
+  // d/d(dst)[(r^2 - dst^2)^3 / (pi r^8 / 4)] = -24 dst (r^2 - dst^2)^2 / (pi r^8)
+  static float smoothingKernelDerivative(float dst, float radius) {
+    if (dst >= radius)
+      return 0.0f;
+    float f = radius * radius - dst * dst;
+    float scale = -24.0f / (PI * std::pow(radius, 8));
+    return scale * dst * f * f;
+  }
+
+  // Estimate the gradient of the scalar field stored in particleProperties at
+  // a sample point (SPH gradient of a property). Uses the cached densities.
+  float3 calculatePropertyGradient(const float3 &samplePoint) const {
+    float3 propertyGradient = float3(0.0f);
+    for (int i = 0; i < globalNumParticles; i++) {
+      float3 offset = particles[i].position - samplePoint;
+      float dst = length(offset);
+      if (dst < Epsilon)
+        continue; // coincident sample: direction undefined, skip
+      float3 dir = offset / dst;
+      float slope = smoothingKernelDerivative(dst, smoothingRadius);
+      float density = densities[i];
+      propertyGradient +=
+          -particleProperties[i] * dir * slope * particleMass / density;
+    }
+    return propertyGradient;
+  }
+
+  // Ideal-gas-style pressure from local density: how far the fluid is from
+  // its rest density, scaled by a stiffness. Can be negative (attractive)
+  // when the fluid is under-dense.
+  static float convertDensityToPressure(float density) {
+    float densityError = density - targetDensity;
+    return densityError * pressureMultiplier;
+  }
+
+  // Symmetric pressure between two particles so the pair-wise force obeys
+  // Newton's third law (equal and opposite).
+  static float calculateSharedPressure(float densityA, float densityB) {
+    float pressureA = convertDensityToPressure(densityA);
+    float pressureB = convertDensityToPressure(densityB);
+    return (pressureA + pressureB) * 0.5f;
+  }
+
+  // Net pressure force on a particle: the SPH pressure gradient, using the
+  // shared pressure and the cached densities.
+  float3 calculatePressureForce(int particleIndex) const {
+    float3 pressureForce = float3(0.0f);
+    for (int i = 0; i < globalNumParticles; i++) {
+      if (i == particleIndex)
+        continue;
+      float3 offset = particles[i].predictedPosition -
+                      particles[particleIndex].predictedPosition;
+      float dst = length(offset);
+      float3 dir;
+      if (dst < Epsilon) {
+        // coincident particles: pick a random push direction (2D)
+        float angle = PCG32::rand() * 2.0f * PI;
+        dir = float3(std::cos(angle), std::sin(angle), 0.0f);
+      } else {
+        dir = offset / dst;
+      }
+      float slope = smoothingKernelDerivative(dst, smoothingRadius);
+      float density = densities[i];
+      float sharedPressure =
+          calculateSharedPressure(density, densities[particleIndex]);
+      pressureForce += sharedPressure * dir * slope * particleMass / density;
+    }
+    return pressureForce;
   }
 };
 static ParticleSystem globalParticleSystem;
