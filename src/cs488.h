@@ -73,11 +73,12 @@ constexpr float cr = 0.5f;
 // SPH parameters
 constexpr float smoothingRadius = 0.2f; // kernel support radius
 constexpr float particleMass = 1.0f;    // mass used for density accumulation
-constexpr float collisionDamping =
-    0.5f; // fraction of velocity kept on a wall bounce (1 = perfectly elastic)
+constexpr float collisionDamping = 0.9f; // fraction of velocity kept on a wall bounce (1 = perfectly elastic)
 constexpr float3 boundsSize = float3(1.0f, 1.0f, 1.0f); // simulation box extents
-constexpr float targetDensity = 977.0f;    // rest density the fluid relaxes to
-constexpr float pressureMultiplier = 15.0f; // stiffness (pressure per density error)
+constexpr float targetDensity = 1193.0f;   // rest density the fluid relaxes to
+constexpr float pressureMultiplier = 30.0f; // stiffness (pressure per density error)
+constexpr float viscosityStrength = 0.001f; // how strongly neighbours' velocities are averaged (low = water, high = syrup)
+constexpr int simIterationsPerFrame = 3;    // physics substeps per rendered frame (livelier motion + stability)
 
 // particle visualization
 constexpr float particleRenderRadius = 0.01f; // visual radius of each circle
@@ -1681,7 +1682,8 @@ public:
   float mass = 2e-3f;
   float3 force = float3(0.0f);
   void reset() {
-    position = float3(PCG32::rand() - 0.5f, PCG32::rand() - 0.5f, 0.0f);
+    position = float3(PCG32::rand() - 0.5f, PCG32::rand() - 0.5f,
+                      PCG32::rand() - 0.5f);
     velocity = float3(0.0f);
     prevPosition = position;
     predictedPosition = position;
@@ -1691,7 +1693,7 @@ public:
   // flip velocity 
   void resolveCollisions() {
     const float3 halfBounds = boundsSize * 0.5f;
-    for (int axis = 0; axis < 2; axis++) {
+    for (int axis = 0; axis < 3; axis++) {
       if (std::abs(position[axis]) > halfBounds[axis]) {
         position[axis] = halfBounds[axis] * ((position[axis] > 0) ? 1.0f : -1.0f);
         velocity[axis] *= -collisionDamping;
@@ -1705,6 +1707,7 @@ public:
   std::vector<Particle> particles;
   std::vector<float> densities;          // cached density per particle
   std::vector<float> particleProperties; // arbitrary scalar field (demo)
+  std::vector<float3> viscosityForces;   // scratch buffer for viscosity pass
   TriangleMesh particlesMesh;
   TriangleMesh sphere;
   const char *sphereMeshFilePath = 0;
@@ -1761,6 +1764,7 @@ public:
     particles.resize(globalNumParticles);
     densities.resize(globalNumParticles, 0.0f);
     particleProperties.resize(globalNumParticles, 0.0f);
+    viscosityForces.resize(globalNumParticles, float3(0.0f));
     particlesMesh.materials.resize(1);
     for (int i = 0; i < globalNumParticles; i++) {
       particles[i].reset();
@@ -1783,7 +1787,17 @@ public:
     updateMesh();
   }
 
+  // Called once per rendered frame: advance the physics a few substeps (each
+  // stable at deltaT) so the fluid moves at a lively rate, then refresh the
+  // render mesh once.
   void step() {
+    for (int iter = 0; iter < simIterationsPerFrame; iter++) {
+      simulationStep();
+    }
+    updateMesh();
+  }
+
+  void simulationStep() {
     // 1. apply gravity, then predict where each particle will be next.
     //    SPH quantities are sampled at these predicted positions, which
     //    damps the jitter/blow-ups that explicit Euler otherwise produces.
@@ -1795,10 +1809,21 @@ public:
     updateDensities();
 
     // 2. pressure force -> acceleration -> velocity
+    //    (pressure is independent of velocity, so applying in-place is fine)
     for (int i = 0; i < globalNumParticles; i++) {
       float3 pressureForce = calculatePressureForce(i);
       float3 pressureAcceleration = pressureForce / densities[i];
       particles[i].velocity += pressureAcceleration * deltaT;
+    }
+
+    // 2b. viscosity: pull each velocity toward the neighbourhood average.
+    //     Computed from a snapshot of the current velocities (fill first,
+    //     then apply) so the result is independent of iteration order.
+    for (int i = 0; i < globalNumParticles; i++) {
+      viscosityForces[i] = calculateViscosityForce(i);
+    }
+    for (int i = 0; i < globalNumParticles; i++) {
+      particles[i].velocity += viscosityForces[i] * deltaT;
     }
 
     // 3. advance positions and resolve wall collisions
@@ -1806,8 +1831,6 @@ public:
       particles[i].position += particles[i].velocity * deltaT;
       particles[i].resolveCollisions();
     }
-
-    updateMesh();
   }
 
   // Recompute and cache the density of every particle, sampled at the
@@ -1835,10 +1858,12 @@ public:
   }
 
 
+  // 3D "spiky" smoothing kernel: (r - d)^2 normalized so its integral over the
+  // support sphere is 1 (volume = 2*pi*r^5/15). Gradient is non-zero as d->0.
   static float smoothingKernel(float radius, float dst) {
     if (dst >= radius)
       return 0.0f;
-    float volume = (PI * std::pow(radius, 4)) / 6.0f;
+    float volume = (2.0f * PI * std::pow(radius, 5)) / 15.0f;
     float value = radius - dst;
     return (value * value) / volume;
   }
@@ -1854,10 +1879,12 @@ public:
     return density;
   }
 
+  // Derivative of the 3D spiky kernel: d/d(dst)[(r-dst)^2 / (2*pi*r^5/15)]
+  //   = -15 (r - dst) / (pi r^5). Largest magnitude at dst = 0.
   static float smoothingKernelDerivative(float dst, float radius) {
     if (dst >= radius)
       return 0.0f;
-    float scale = 12.0f / (PI * std::pow(radius, 4));
+    float scale = 15.0f / (PI * std::pow(radius, 5));
     return (dst - radius) * scale; // negative inside the radius
   }
 
@@ -1907,9 +1934,11 @@ public:
       float dst = length(offset);
       float3 dir;
       if (dst < Epsilon) {
-        // coincident particles: pick a random push direction (2D)
-        float angle = PCG32::rand() * 2.0f * PI;
-        dir = float3(std::cos(angle), std::sin(angle), 0.0f);
+        // coincident particles: pick a random push direction on the unit sphere
+        float z = PCG32::rand() * 2.0f - 1.0f;
+        float a = PCG32::rand() * 2.0f * PI;
+        float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+        dir = float3(r * std::cos(a), r * std::sin(a), z);
       } else {
         dir = offset / dst;
       }
@@ -1920,6 +1949,33 @@ public:
       pressureForce += sharedPressure * dir * slope * particleMass / density;
     }
     return pressureForce;
+  }
+
+  // Smooth (poly6-style) kernel used for viscosity, 3D normalized
+  // (volume = 64*pi*r^9/315). Flat near dst=0 so it averages velocities gently
+  // over the whole neighbourhood rather than emphasising the closest particles.
+  static float viscosityKernel(float radius, float dst) {
+    if (dst >= radius)
+      return 0.0f;
+    float volume = (64.0f * PI * std::pow(radius, 9)) / 315.0f;
+    float v = radius * radius - dst * dst;
+    return (v * v * v) / volume;
+  }
+
+  // Viscosity force: nudges a particle's velocity toward the (kernel-weighted)
+  // average velocity of its neighbours, dissipating relative motion.
+  float3 calculateViscosityForce(int particleIndex) const {
+    float3 viscosityForce = float3(0.0f);
+    const float3 pos = particles[particleIndex].predictedPosition;
+    const float3 vel = particles[particleIndex].velocity;
+    for (int i = 0; i < globalNumParticles; i++) {
+      if (i == particleIndex)
+        continue;
+      float dst = length(particles[i].predictedPosition - pos);
+      float influence = viscosityKernel(smoothingRadius, dst);
+      viscosityForce += (particles[i].velocity - vel) * influence;
+    }
+    return viscosityForce * viscosityStrength;
   }
 };
 static ParticleSystem globalParticleSystem;
