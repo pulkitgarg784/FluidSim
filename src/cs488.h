@@ -67,7 +67,7 @@ bool globalEnableParticles = false;
 constexpr float deltaT = 0.002f;
 constexpr float3 globalGravity = float3(0.0f, -9.8f, 0.0f);
 constexpr float globalGravityConst = 1.0f;
-constexpr int globalNumParticles = 20;
+constexpr int globalNumParticles = 200;
 constexpr float cr = 0.5f;
 
 // dynamic camera parameters
@@ -112,14 +112,7 @@ static const std::string FSDrawSource = R"(
 )";
 static const char *PFSDrawSource = FSDrawSource.c_str();
 
-// ============================================================================
-// GPU rasterization shaders (used by GPURasterizer / Scene::RasterizeGPU).
-// These replace the CPU scanline rasterizer: geometry is uploaded to a VBO and
-// the hardware pipeline (vertex + fragment shaders, hardware depth buffer)
-// performs the rasterization. GLSL 120 is used to stay compatible with the
-// legacy OpenGL 2.1 context created by OpenGLInit.
-// ============================================================================
-static const char *GPUMeshVSSource = R"(
+static const char *MeshVertShader = R"(
     #version 120
 
     attribute vec3 aPos;    // vertex position (world space)
@@ -145,7 +138,7 @@ static const char *GPUMeshVSSource = R"(
         gl_Position = uMVP * vec4(aPos, 1.0);
     }
 )";
-static const char *GPUMeshFSSource = R"(
+static const char *MeshFragShader = R"(
     #version 120
 
     varying vec3 vPos;
@@ -214,7 +207,7 @@ static const char *GPUMeshFSSource = R"(
 )";
 
 // Depth-only shaders used to render the shadow map from the light's viewpoint.
-static const char *GPUDepthVSSource = R"(
+static const char *DepthVertShader = R"(
     #version 120
     attribute vec3 aPos;
     uniform mat4 uLightMVP;
@@ -222,7 +215,7 @@ static const char *GPUDepthVSSource = R"(
         gl_Position = uLightMVP * vec4(aPos, 1.0);
     }
 )";
-static const char *GPUDepthFSSource = R"(
+static const char *DepthFragShader = R"(
     #version 120
     void main() {
         gl_FragColor = vec4(1.0); // color unused; depth is written automatically
@@ -521,8 +514,6 @@ public:
   int textureWidth = 0;
   int textureHeight = 0;
 
-  // lazily-created GPU texture handle (0 = not uploaded yet), used by
-  // GPURasterizer. mutable so it can be filled during a const render pass.
   mutable GLuint glTexture = 0;
 
   Material() {};
@@ -1668,8 +1659,6 @@ bool BVH::traverse(HitInfo &minHit, const Ray &ray, int node_id, float tMin,
   return hit;
 }
 
-// ====== implement it in A3 ======
-// fill in the missing parts
 class Particle {
 public:
   float3 position = float3(0.0f);
@@ -1680,10 +1669,6 @@ public:
   void reset() {
     position =
         float3(PCG32::rand(), PCG32::rand(), PCG32::rand()) - float(0.5f);
-    velocity =
-        2.0f * float3((PCG32::rand() - 0.5f), 0.0f, (PCG32::rand() - 0.5f));
-   
-    // UNCOMMENT FOR TASK 4. This disables initial velcity, so gravity can be seen better
     velocity = float3(0.0f);
     prevPosition = position;
     position += velocity * deltaT;
@@ -1693,47 +1678,25 @@ public:
   void step() {
     float3 temp = position;
 
-    // Task 1 START  ----------------------------------------
-    // NOTE: THIS IS DOWNWARDS GRAVITY. DISABLE THIS FOR TASK 4
-    // float3 displacement = position - prevPosition;
-    // position = position + displacement + globalGravity * (deltaT * deltaT);
-    // Task 1 END -------------------------------------------
-    
+    float3 displacement = position - prevPosition;
+    position = position + displacement + globalGravity * (deltaT * deltaT);
 
-    // Task 2 START --------------
-    // const float boxMin = -0.5f;
-    // const float boxMax = 0.5f;
-    // for (int axis = 0; axis < 3; axis++) {
-    //   float w;
-    //   if (position[axis] < boxMin)
-    //     w = boxMin;
-    //   else if (position[axis] > boxMax)
-    //     w = boxMax;
-    //   else
-    //     continue;
-    //
-    //   float a = temp[axis] - w;
-    //   float b = position[axis] - w;
-    //   position[axis] = w;
-    //   temp[axis] = w + cr * (b - a);
-    // }
-    // // Task 2 END -------------------------------
+    const float boxMin = -0.5f;
+    const float boxMax = 0.5f;
+    for (int axis = 0; axis < 3; axis++) {
+      float w;
+      if (position[axis] < boxMin)
+        w = boxMin;
+      else if (position[axis] > boxMax)
+        w = boxMax;
+      else
+        continue;
 
-
-    // Task 3 START -------------------------------
-    // Constrain by projecting the current position to nearest point on sphere
-    // float3 sphereCenter(0, 0, 0);
-    // float sphereRadius = 0.5f;
-    // float3 d = position - sphereCenter;
-    // float len = length(d);
-    // if (len > Epsilon)
-    //   position = sphereCenter + sphereRadius * (d / len);
-    // Task 3 END -----------------------
-
-    // Task 4 START ------------------------------
-    float3 accel = force / mass;
-    position = position + (position - prevPosition) + accel * (deltaT * deltaT);
-    // Task 4 END ---------------------------------
+      float a = temp[axis] - w;
+      float b = position[axis] - w;
+      position[axis] = w;
+      temp[axis] = w + cr * (b - a);
+    }
 
     prevPosition = temp;
     velocity = (position - prevPosition) / deltaT;
@@ -1845,7 +1808,7 @@ public:
 
           float3 n = delta / d; // normal from i to j
 
-          // Response 
+          // Response
           float3 push = 0.5f * (dp - d) * n;
           particles[i].position -= push;
           particles[i].prevPosition -= push;
@@ -1871,14 +1834,7 @@ public:
 };
 static ParticleSystem globalParticleSystem;
 
-// ============================================================================
-// GPURasterizer
-// Uploads triangle geometry to a GPU vertex buffer and rasterizes it with the
-// hardware pipeline (vertex/fragment shaders + hardware depth buffer), instead
-// of the CPU scanline rasterizer in TriangleMesh::rasterizeTriangle.
-//
-// Interleaved vertex layout (per vertex): position(3) normal(3) Kd(3).
-// ============================================================================
+// GPU rasterizer class
 class GPURasterizer {
 public:
   static constexpr int kMaxLights = 8;
@@ -1986,8 +1942,8 @@ public:
     if (initialized)
       return;
 
-    program = linkProgram(GPUMeshVSSource, GPUMeshFSSource);
-    depthProgram = linkProgram(GPUDepthVSSource, GPUDepthFSSource);
+    program = linkProgram(MeshVertShader, MeshFragShader);
+    depthProgram = linkProgram(DepthVertShader, DepthFragShader);
 
     aPos = glGetAttribLocation(program, "aPos");
     aNormal = glGetAttribLocation(program, "aNormal");
@@ -2010,9 +1966,7 @@ public:
     glGenBuffers(1, &vbo);
     initShadowMap();
 
-    // 1x1 white fallback texture. Bound to unit 0 for untextured surfaces so
-    // the color sampler always has a complete, loadable texture (avoids macOS
-    // "texture unloadable" warnings) while leaving Kd unmodified.
+    // Fallback texture. Was getting warnings on MacOS without this.
     glGenTextures(1, &whiteTex);
     glBindTexture(GL_TEXTURE_2D, whiteTex);
     const unsigned char white[3] = {255, 255, 255};
@@ -2190,7 +2144,7 @@ public:
     }
 
     glUniform1i(uShadowEnabled, shadowEnabled ? 1 : 0);
-    glUniform1i(uColorTex, 0); // color texture -> unit 0
+    glUniform1i(uColorTex, 0);  // color texture -> unit 0
     glUniform1i(uShadowMap, 1); // shadow map    -> unit 1
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, shadowTex);
