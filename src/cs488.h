@@ -70,6 +70,13 @@ constexpr float globalGravityConst = 1.0f;
 constexpr int globalNumParticles = 200;
 constexpr float cr = 0.5f;
 
+// SPH parameters
+constexpr float smoothingRadius = 0.2f; // kernel support radius
+constexpr float particleMass = 1.0f;    // mass used for density accumulation
+constexpr float collisionDamping =
+    0.5f; // fraction of velocity kept on a wall bounce (1 = perfectly elastic)
+constexpr float3 boundsSize = float3(1.0f, 1.0f, 1.0f); // simulation box extents
+
 // dynamic camera parameters
 float3 globalEye = float3(0.0f, 0.0f, 1.5f);
 float3 globalLookat = float3(0.0f, 0.0f, 0.0f);
@@ -1666,40 +1673,31 @@ public:
   float3 prevPosition = position;
   float mass = 2e-3f;
   float3 force = float3(0.0f);
+  float density = 0.0f;
   void reset() {
-    position =
-        float3(PCG32::rand(), PCG32::rand(), PCG32::rand()) - float(0.5f);
+    position = float3(PCG32::rand() - 0.5f, PCG32::rand() - 0.5f, 0.0f);
     velocity = float3(0.0f);
     prevPosition = position;
-    position += velocity * deltaT;
     force = float3(0.0f);
+    density = 0.0f;
   }
 
+  // itegrate gravity into the velocity, then set position
   void step() {
-    float3 temp = position;
+    velocity += globalGravity * deltaT;
+    position += velocity * deltaT;
+    resolveCollisions();
+  }
 
-    float3 displacement = position - prevPosition;
-    position = position + displacement + globalGravity * (deltaT * deltaT);
-
-    const float boxMin = -0.5f;
-    const float boxMax = 0.5f;
-    for (int axis = 0; axis < 3; axis++) {
-      float w;
-      if (position[axis] < boxMin)
-        w = boxMin;
-      else if (position[axis] > boxMax)
-        w = boxMax;
-      else
-        continue;
-
-      float a = temp[axis] - w;
-      float b = position[axis] - w;
-      position[axis] = w;
-      temp[axis] = w + cr * (b - a);
+  // flip velocity 
+  void resolveCollisions() {
+    const float3 halfBounds = boundsSize * 0.5f;
+    for (int axis = 0; axis < 2; axis++) {
+      if (std::abs(position[axis]) > halfBounds[axis]) {
+        position[axis] = halfBounds[axis] * ((position[axis] > 0) ? 1.0f : -1.0f);
+        velocity[axis] *= -collisionDamping;
+      }
     }
-
-    prevPosition = temp;
-    velocity = (position - prevPosition) / deltaT;
   }
 };
 
@@ -1772,64 +1770,38 @@ public:
   }
 
   void step() {
-    // add some particle-particle interaction here
-
-    // TASK 4 -------------------
+    // --- SPH step 1: compute the density at each particle ---
+    // (later steps will use this to derive pressure and pressure forces)
     for (int i = 0; i < globalNumParticles; i++) {
-      particles[i].force = float3(0.0f);
-      for (int j = 0; j < globalNumParticles; j++) {
-        if (i == j)
-          continue;
-        float3 r = particles[j].position - particles[i].position;
-        float dist = length(r) + 0.01f;
-        float inv3 = 1.0f / (dist * dist * dist);
-        float3 gravForce =
-            (globalGravityConst * particles[i].mass * particles[j].mass) * r *
-            inv3;
-        particles[i].force += gravForce;
-      }
+      particles[i].density = calculateDensity(particles[i].position);
     }
-    // Task 4 END ----------------------
 
+    // --- integrate: gravity affects velocity, velocity moves position ---
     for (int i = 0; i < globalNumParticles; i++) {
       particles[i].step();
     }
 
-    // Task 5 START -----------------------------------------------------
-    if (sphereSize > 0.0f) {
-      const float dp = 2.0f * sphereSize;
-
-      for (int i = 0; i < globalNumParticles; i++) {
-        for (int j = i + 1; j < globalNumParticles; j++) {
-          float3 delta = particles[j].position - particles[i].position;
-          float d = length(delta);
-          if (d >= dp || d <= Epsilon)
-            continue;
-
-          float3 n = delta / d; // normal from i to j
-
-          // Response
-          float3 push = 0.5f * (dp - d) * n;
-          particles[i].position -= push;
-          particles[i].prevPosition -= push;
-          particles[j].position += push;
-          particles[j].prevPosition += push;
-
-          // Normals for energy conservation
-          float ai = dot(particles[i].position - particles[i].prevPosition, n);
-          float aj = dot(particles[j].position - particles[j].prevPosition, n);
-
-          if (ai > aj) {
-            float k = 0.5f * (1.0f + cr);
-            particles[i].prevPosition += k * (ai - aj) * n;
-            particles[j].prevPosition += k * (aj - ai) * n;
-          }
-        }
-      }
-    }
-    // Task 5 END ----------------------------------------------------------
-
     updateMesh();
+  }
+
+
+  static float smoothingKernel(float radius, float dst) {
+    if (dst >= radius)
+      return 0.0f;
+    float volume = (PI * std::pow(radius, 8)) / 4.0f;
+    float value = radius * radius - dst * dst; 
+    return (value * value * value) / volume;
+  }
+
+  // Accumulate the density contribution of every particle at a sample point.
+  float calculateDensity(const float3 &samplePoint) const {
+    float density = 0.0f;
+    for (const Particle &p : particles) {
+      float dst = length(p.position - samplePoint);
+      float influence = smoothingKernel(smoothingRadius, dst);
+      density += particleMass * influence;
+    }
+    return density;
   }
 };
 static ParticleSystem globalParticleSystem;
