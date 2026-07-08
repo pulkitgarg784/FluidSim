@@ -76,7 +76,7 @@ constexpr float particleMass = 1.0f;    // mass used for density accumulation
 constexpr float collisionDamping =
     0.5f; // fraction of velocity kept on a wall bounce (1 = perfectly elastic)
 constexpr float3 boundsSize = float3(1.0f, 1.0f, 1.0f); // simulation box extents
-constexpr float targetDensity = 960.0f;    // rest density the fluid relaxes to
+constexpr float targetDensity = 977.0f;    // rest density the fluid relaxes to
 constexpr float pressureMultiplier = 15.0f; // stiffness (pressure per density error)
 
 // particle visualization
@@ -1752,6 +1752,7 @@ public:
           particlesMesh.triangles[t].normals[0] = -globalViewDir;
           particlesMesh.triangles[t].normals[1] = -globalViewDir;
           particlesMesh.triangles[t].normals[2] = -globalViewDir;
+        }
       }
     }
   }
@@ -1837,9 +1838,9 @@ public:
   static float smoothingKernel(float radius, float dst) {
     if (dst >= radius)
       return 0.0f;
-    float volume = (PI * std::pow(radius, 8)) / 4.0f;
-    float value = radius * radius - dst * dst; 
-    return (value * value * value) / volume;
+    float volume = (PI * std::pow(radius, 4)) / 6.0f;
+    float value = radius - dst;
+    return (value * value) / volume;
   }
 
   // Accumulate the density contribution of every particle at a sample point.
@@ -1853,14 +1854,11 @@ public:
     return density;
   }
 
-  // Analytic derivative of smoothingKernel w.r.t. dst.
-  // d/d(dst)[(r^2 - dst^2)^3 / (pi r^8 / 4)] = -24 dst (r^2 - dst^2)^2 / (pi r^8)
   static float smoothingKernelDerivative(float dst, float radius) {
     if (dst >= radius)
       return 0.0f;
-    float f = radius * radius - dst * dst;
-    float scale = -24.0f / (PI * std::pow(radius, 8));
-    return scale * dst * f * f;
+    float scale = 12.0f / (PI * std::pow(radius, 4));
+    return (dst - radius) * scale; // negative inside the radius
   }
 
   // Estimate the gradient of the scalar field stored in particleProperties at
