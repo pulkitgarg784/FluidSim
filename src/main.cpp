@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -135,9 +136,14 @@ int main() {
 
   std::vector<vkr::InstanceData> instances(sph::numParticles);
 
-  const float renderRadius = 0.03f;
+  const float renderRadius = 0.02f;
 
   double lastTime = glfwGetTime();
+
+  // FPS counter variables
+  auto fpsStartTime = std::chrono::high_resolution_clock::now();
+  uint64_t frameCount = 0;
+  double fps = 0.0;
 
   try {
     while (!renderer.shouldClose()) {
@@ -172,6 +178,19 @@ int main() {
 
       renderer.drawFrame(instances, viewProj, globalRight, camUp,
                          renderRadius);
+
+      // Update FPS counter
+      frameCount++;
+      auto currentTime = std::chrono::high_resolution_clock::now();
+      auto elapsed = std::chrono::duration<double>(currentTime - fpsStartTime).count();
+      
+      // Update and print FPS every second
+      if (elapsed >= 1.0) {
+        fps = frameCount / elapsed;
+        frameCount = 0;
+        fpsStartTime = currentTime;
+        std::cout << "FPS: " << fps << std::endl;
+      }
     }
     renderer.waitIdle();
   } catch (const std::exception &e) {

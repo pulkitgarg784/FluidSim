@@ -5,20 +5,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# ---------------------------------------------------------------------------
-# Dependencies
-# ---------------------------------------------------------------------------
 find_package(Vulkan REQUIRED)
 
-# GLFW (only used for windowing + Vulkan surface creation)
+# GLFW
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 add_subdirectory(external/glfw)
 
-# ---------------------------------------------------------------------------
-# Shader compilation (GLSL -> SPIR-V)
-# ---------------------------------------------------------------------------
+# Shader compilation
 find_program(GLSLC glslc HINTS
     $ENV{VULKAN_SDK}/bin
     /usr/local/bin
@@ -48,9 +43,6 @@ endforeach()
 
 add_custom_target(shaders DEPENDS ${SPIRV_OUTPUTS})
 
-# ---------------------------------------------------------------------------
-# Executable
-# ---------------------------------------------------------------------------
 add_executable(CS488 src/main.cpp)
 add_dependencies(CS488 shaders)
 

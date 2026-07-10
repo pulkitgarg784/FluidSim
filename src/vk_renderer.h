@@ -21,6 +21,25 @@ using namespace linalg::aliases;
 #define SHADER_DIR "shaders"
 #endif
 
+// OS detection macros
+#if defined(__APPLE__)
+  #define VKR_OS_MACOS 1
+  #define VKR_OS_LINUX 0
+  #define VKR_OS_WINDOWS 0
+#elif defined(__linux__)
+  #define VKR_OS_MACOS 0
+  #define VKR_OS_LINUX 1
+  #define VKR_OS_WINDOWS 0
+#elif defined(_WIN32)
+  #define VKR_OS_MACOS 0
+  #define VKR_OS_LINUX 0
+  #define VKR_OS_WINDOWS 1
+#else
+  #define VKR_OS_MACOS 0
+  #define VKR_OS_LINUX 0
+  #define VKR_OS_WINDOWS 0
+#endif
+
 namespace vkr {
 
 // Per-instance vertex attributes
@@ -257,13 +276,17 @@ private:
     uint32_t glfwExtCount = 0;
     const char **glfwExts = glfwGetRequiredInstanceExtensions(&glfwExtCount);
     std::vector<const char *> extensions(glfwExts, glfwExts + glfwExtCount);
-    // MoltenVK / portability
+    
+    // MoltenVK / portability extensions (macOS only)
+    #if VKR_OS_MACOS
     extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-    extensions.push_back(
-        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    #endif
 
     VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    #if VKR_OS_MACOS
     ci.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    #endif
     ci.pApplicationInfo = &app;
     ci.enabledExtensionCount = (uint32_t)extensions.size();
     ci.ppEnabledExtensionNames = extensions.data();
@@ -335,6 +358,7 @@ private:
     // Required device extensions. Add portability_subset if the device
     // advertises it (mandatory to enable on MoltenVK when present).
     std::vector<const char *> deviceExts = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    #if VKR_OS_MACOS
     uint32_t extCount = 0;
     vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extCount,
                                          nullptr);
@@ -347,6 +371,7 @@ private:
         break;
       }
     }
+    #endif
 
     VkPhysicalDeviceFeatures features{};
 
