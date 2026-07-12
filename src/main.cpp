@@ -133,7 +133,35 @@ int main() {
   glfwSetMouseButtonCallback(win, mouseButtonFunc);
   glfwSetCursorPosCallback(win, cursorPosFunc);
 
-  std::vector<vkr::InstanceData> instances(sph::numParticles);
+  // Push SPH parameters
+  vkr::SphParams params{};
+  params.gravity[0] = sph::gravity.x;
+  params.gravity[1] = sph::gravity.y;
+  params.gravity[2] = sph::gravity.z;
+  params.boundsSize[0] = sph::boundsSize.x;
+  params.boundsSize[1] = sph::boundsSize.y;
+  params.boundsSize[2] = sph::boundsSize.z;
+  params.deltaT = sph::deltaT;
+  params.smoothingRadius = sph::smoothingRadius;
+  params.particleMass = sph::particleMass;
+  params.targetDensity = sph::targetDensity;
+  params.pressureMultiplier = sph::pressureMultiplier;
+  params.viscosityStrength = sph::viscosityStrength;
+  params.collisionDamping = sph::collisionDamping;
+  params.spikyPow2Scale = sph::Pow2Scale;
+  params.spikyPow2GradScale = sph::Pow2GradScale;
+  params.poly6Scale = sph::viscocityScale;
+  params.numParticles = (uint32_t)sph::numParticles;
+  params.epsilon = sph::Epsilon;
+  renderer.setParams(params);
+
+  // copy initial particle positions and velocities into GPU buffers
+  std::vector<float4> initPos(sph::numParticles), initVel(sph::numParticles);
+  for (int i = 0; i < sph::numParticles; i++) {
+    initPos[i] = float4(sim.particles[i].position, 0.0f);
+    initVel[i] = float4(sim.particles[i].velocity, 0.0f);
+  }
+  renderer.uploadInitialState(initPos, initVel);
 
   const float renderRadius = 0.02f;
 
@@ -160,8 +188,6 @@ int main() {
       globalViewDir = normalize(globalLookat - globalEye);
       globalRight = normalize(cross(globalViewDir, globalUp));
 
-      sim.step();
-
       const float3 camUp = cross(globalRight, globalViewDir);
 
       const float aspect = float(width) / float(height);
@@ -169,14 +195,9 @@ int main() {
       const float4x4 view = lookAt(globalEye, globalLookat, globalUp);
       const float4x4 viewProj = mul(proj, view);
 
-      // pack instance data
-      for (int i = 0; i < sph::numParticles; i++) {
-        instances[i].pos = sim.particles[i].position;
-        instances[i].speed = length(sim.particles[i].velocity);
-      }
-
-      renderer.drawFrame(instances, viewProj, globalRight, camUp,
-                         renderRadius);
+      // the simulation now runs entirely on the GPU inside drawFrame
+      renderer.drawFrame(viewProj, globalRight, camUp, renderRadius,
+                         sph::simIterationsPerFrame);
 
       // Update FPS counter
       frameCount++;

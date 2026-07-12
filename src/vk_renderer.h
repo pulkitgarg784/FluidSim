@@ -42,10 +42,24 @@ using namespace linalg::aliases;
 
 namespace vkr {
 
-// Per-instance vertex attributes
-struct InstanceData {
-  float3 pos;
-  float speed;
+// SPH parameter block
+struct SphParams {
+  float gravity[4];    // xyz used
+  float boundsSize[4]; // xyz used
+  float deltaT;
+  float smoothingRadius;
+  float particleMass;
+  float targetDensity;
+  float pressureMultiplier;
+  float viscosityStrength;
+  float collisionDamping;
+  float spikyPow2Scale;
+  float spikyPow2GradScale;
+  float poly6Scale;
+  uint32_t numParticles;
+  float epsilon;
+  uint32_t paddedCount; // num particles rounded up to a power of two
+  uint32_t _pad0, _pad1, _pad2; // round the block up to a 16-byte multiple, compiler warning
 };
 
 // Push-constant block
@@ -66,10 +80,12 @@ inline void vkCheck(VkResult r, const char *what) {
 
 class VulkanRenderer {
 public:
-  static constexpr int kMaxFramesInFlight = 2;
+  // A single simulation state lives in the SSBOs, so we serialize to one
+  // frame in flight to avoid two frames racing on those buffers.
+  static constexpr int kMaxFramesInFlight = 1;
 
-  void init(int width, int height, const char *title, uint32_t maxInstances) {
-    maxInstances_ = maxInstances;
+  void init(int width, int height, const char *title, uint32_t numParticles) {
+    numParticles_ = numParticles;
     initWindow(width, height, title);
     createInstance(title);
     createSurface();
@@ -80,9 +96,12 @@ public:
     createRenderPass();
     createDepthResources();
     createFramebuffers();
+    createComputeBuffers();
+    createDescriptorSetLayout();
+    createDescriptorPoolAndSet();
     createGraphicsPipeline();
+    createComputePipelines();
     createQuadVertexBuffer();
-    createInstanceBuffers();
     createCommandPoolAndBuffers();
     createSyncObjects();
   }
@@ -92,10 +111,23 @@ public:
   void pollEvents() const { glfwPollEvents(); }
   void waitIdle() const { vkDeviceWaitIdle(device_); }
 
-  // Upload the instances and draw one frame.
-  void drawFrame(const std::vector<InstanceData> &instances,
-                 const float4x4 &viewProj, const float3 &camRight,
-                 const float3 &camUp, float radius) {
+  // Write the SPH parameter block to UBO
+  void setParams(SphParams params) {
+    params.paddedCount = paddedCount_;
+    std::memcpy(paramsMapped_, &params, sizeof(SphParams));
+  }
+
+  // 4th is unused, but we use float4 to match the shader layout
+  void uploadInitialState(const std::vector<float4> &positions,
+                          const std::vector<float4> &velocities) {
+    uint32_t n = std::min<uint32_t>(numParticles_, (uint32_t)positions.size());
+    std::memcpy(positionsMapped_, positions.data(), n * sizeof(float4));
+    std::memcpy(velocitiesMapped_, velocities.data(), n * sizeof(float4));
+  }
+
+  // Advance the simulation `substeps` times on the GPU, then draw one frame.
+  void drawFrame(const float4x4 &viewProj, const float3 &camRight,
+                 const float3 &camUp, float radius, int substeps) {
     vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE,
                     UINT64_MAX);
 
@@ -112,14 +144,6 @@ public:
 
     vkResetFences(device_, 1, &inFlightFences_[currentFrame_]);
 
-    // Upload instance data for this frame.
-    uint32_t count = std::min<uint32_t>((uint32_t)instances.size(), maxInstances_);
-    if (count > 0) {
-      std::memcpy(instanceMapped_[currentFrame_], instances.data(),
-                  count * sizeof(InstanceData));
-    }
-    instanceCount_[currentFrame_] = count;
-
     PushConstants pc{};
     pc.viewProj = viewProj;
     pc.camRight = float4(camRight, 0.0f);
@@ -128,7 +152,7 @@ public:
 
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
     vkResetCommandBuffer(cmd, 0);
-    recordCommandBuffer(cmd, imageIndex, pc);
+    recordCommandBuffer(cmd, imageIndex, pc, substeps);
 
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     VkSemaphore waitSemaphores[] = {imageAvailableSemaphores_[currentFrame_]};
@@ -171,17 +195,29 @@ public:
     vkDeviceWaitIdle(device_);
     cleanupSwapchain();
 
+    for (VkPipeline p : computePipelines_)
+      if (p) vkDestroyPipeline(device_, p, nullptr);
+    if (computePipelineLayout_)
+      vkDestroyPipelineLayout(device_, computePipelineLayout_, nullptr);
     if (pipeline_) vkDestroyPipeline(device_, pipeline_, nullptr);
     if (pipelineLayout_) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
     if (renderPass_) vkDestroyRenderPass(device_, renderPass_, nullptr);
 
-    for (int i = 0; i < kMaxFramesInFlight; i++) {
-      if (instanceBuffers_[i]) {
-        vkUnmapMemory(device_, instanceMemories_[i]);
-        vkDestroyBuffer(device_, instanceBuffers_[i], nullptr);
-        vkFreeMemory(device_, instanceMemories_[i], nullptr);
-      }
-    }
+    if (descriptorPool_)
+      vkDestroyDescriptorPool(device_, descriptorPool_, nullptr);
+    if (descriptorSetLayout_)
+      vkDestroyDescriptorSetLayout(device_, descriptorSetLayout_, nullptr);
+
+    destroyBuffer(positionsBuf_, positionsMem_);
+    destroyBuffer(velocitiesBuf_, velocitiesMem_);
+    destroyBuffer(predictedBuf_, predictedMem_);
+    destroyBuffer(densitiesBuf_, densitiesMem_);
+    destroyBuffer(viscForceBuf_, viscForceMem_);
+    destroyBuffer(keysBuf_, keysMem_);
+    destroyBuffer(indicesBuf_, indicesMem_);
+    destroyBuffer(startBuf_, startMem_);
+    destroyBuffer(paramsBuf_, paramsMem_);
+
     if (quadBuffer_) {
       vkDestroyBuffer(device_, quadBuffer_, nullptr);
       vkFreeMemory(device_, quadMemory_, nullptr);
@@ -202,6 +238,17 @@ public:
     if (window_) glfwDestroyWindow(window_);
     glfwTerminate();
     device_ = VK_NULL_HANDLE;
+  }
+
+  void destroyBuffer(VkBuffer &buf, VkDeviceMemory &mem) {
+    if (buf) {
+      vkDestroyBuffer(device_, buf, nullptr);
+      buf = VK_NULL_HANDLE;
+    }
+    if (mem) {
+      vkFreeMemory(device_, mem, nullptr);
+      mem = VK_NULL_HANDLE;
+    }
   }
 
 private:
@@ -234,11 +281,32 @@ private:
 
   VkBuffer quadBuffer_ = VK_NULL_HANDLE;
   VkDeviceMemory quadMemory_ = VK_NULL_HANDLE;
-  uint32_t maxInstances_ = 0;
-  std::array<VkBuffer, kMaxFramesInFlight> instanceBuffers_{};
-  std::array<VkDeviceMemory, kMaxFramesInFlight> instanceMemories_{};
-  std::array<void *, kMaxFramesInFlight> instanceMapped_{};
-  std::array<uint32_t, kMaxFramesInFlight> instanceCount_{};
+
+  uint32_t numParticles_ = 0;
+  uint32_t paddedCount_ = 0; // numParticles rounded up to a power of two
+
+  VkBuffer positionsBuf_ = VK_NULL_HANDLE;   VkDeviceMemory positionsMem_ = VK_NULL_HANDLE;   void *positionsMapped_ = nullptr;
+  VkBuffer velocitiesBuf_ = VK_NULL_HANDLE;  VkDeviceMemory velocitiesMem_ = VK_NULL_HANDLE;  void *velocitiesMapped_ = nullptr;
+  VkBuffer predictedBuf_ = VK_NULL_HANDLE;   VkDeviceMemory predictedMem_ = VK_NULL_HANDLE;
+  VkBuffer densitiesBuf_ = VK_NULL_HANDLE;   VkDeviceMemory densitiesMem_ = VK_NULL_HANDLE;
+  VkBuffer viscForceBuf_ = VK_NULL_HANDLE;   VkDeviceMemory viscForceMem_ = VK_NULL_HANDLE;
+  VkBuffer paramsBuf_ = VK_NULL_HANDLE;      VkDeviceMemory paramsMem_ = VK_NULL_HANDLE;      void *paramsMapped_ = nullptr;
+  // spatial-hash buffers
+  VkBuffer keysBuf_ = VK_NULL_HANDLE;        VkDeviceMemory keysMem_ = VK_NULL_HANDLE;
+  VkBuffer indicesBuf_ = VK_NULL_HANDLE;     VkDeviceMemory indicesMem_ = VK_NULL_HANDLE;
+  VkBuffer startBuf_ = VK_NULL_HANDLE;       VkDeviceMemory startMem_ = VK_NULL_HANDLE;
+
+  VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;
+  VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
+  VkDescriptorSet descriptorSet_ = VK_NULL_HANDLE;
+
+  struct SortPush { uint32_t k; uint32_t j; };
+
+  VkPipelineLayout computePipelineLayout_ = VK_NULL_HANDLE;
+
+  // 0:external 1:hashKeys 2:bitonic 3:startReset 4:startIndices
+  // 5:density 6:pressure 7:viscosity 8:integrate
+  std::array<VkPipeline, 9> computePipelines_{};
 
   VkCommandPool commandPool_ = VK_NULL_HANDLE;
   std::array<VkCommandBuffer, kMaxFramesInFlight> commandBuffers_{};
@@ -648,21 +716,13 @@ private:
     fs.pName = "main";
     VkPipelineShaderStageCreateInfo stages[] = {vs, fs};
 
-    // Binding 0: per-vertex quad corner. Binding 1: per-instance data.
-    std::array<VkVertexInputBindingDescription, 2> bindings{};
+    std::array<VkVertexInputBindingDescription, 1> bindings{};
     bindings[0].binding = 0;
     bindings[0].stride = sizeof(float) * 2;
     bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    bindings[1].binding = 1;
-    bindings[1].stride = sizeof(InstanceData);
-    bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-    std::array<VkVertexInputAttributeDescription, 3> attrs{};
+    std::array<VkVertexInputAttributeDescription, 1> attrs{};
     attrs[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
-    attrs[1] = {1, 1, VK_FORMAT_R32G32B32_SFLOAT,
-                (uint32_t)offsetof(InstanceData, pos)};
-    attrs[2] = {2, 1, VK_FORMAT_R32_SFLOAT,
-                (uint32_t)offsetof(InstanceData, speed)};
 
     VkPipelineVertexInputStateCreateInfo vi{
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
@@ -720,6 +780,8 @@ private:
 
     VkPipelineLayoutCreateInfo pl{
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pl.setLayoutCount = 1;
+    pl.pSetLayouts = &descriptorSetLayout_;
     pl.pushConstantRangeCount = 1;
     pl.pPushConstantRanges = &pcRange;
     vkCheck(vkCreatePipelineLayout(device_, &pl, nullptr, &pipelineLayout_),
@@ -783,17 +845,149 @@ private:
     vkUnmapMemory(device_, quadMemory_);
   }
 
-  void createInstanceBuffers() {
-    VkDeviceSize size = sizeof(InstanceData) * maxInstances_;
-    for (int i = 0; i < kMaxFramesInFlight; i++) {
-      createBuffer(size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                   instanceBuffers_[i], instanceMemories_[i]);
-      vkMapMemory(device_, instanceMemories_[i], 0, size, 0,
-                  &instanceMapped_[i]);
-      instanceCount_[i] = 0;
+  void createComputeBuffers() {
+    paddedCount_ = 1;
+    while (paddedCount_ < numParticles_) paddedCount_ <<= 1;
+
+    const VkBufferUsageFlags storageUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    const VkMemoryPropertyFlags hostProps =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    VkDeviceSize vec4Size = sizeof(float) * 4 * numParticles_;
+    VkDeviceSize fltSize = sizeof(float) * numParticles_;
+
+    createBuffer(vec4Size, storageUsage, hostProps, positionsBuf_, positionsMem_);
+    vkMapMemory(device_, positionsMem_, 0, vec4Size, 0, &positionsMapped_);
+    createBuffer(vec4Size, storageUsage, hostProps, velocitiesBuf_, velocitiesMem_);
+    vkMapMemory(device_, velocitiesMem_, 0, vec4Size, 0, &velocitiesMapped_);
+    createBuffer(vec4Size, storageUsage, hostProps, predictedBuf_, predictedMem_);
+    createBuffer(fltSize, storageUsage, hostProps, densitiesBuf_, densitiesMem_);
+    createBuffer(vec4Size, storageUsage, hostProps, viscForceBuf_, viscForceMem_);
+
+    VkDeviceSize keySize = sizeof(uint32_t) * paddedCount_;
+    createBuffer(keySize, storageUsage, hostProps, keysBuf_, keysMem_);
+    createBuffer(keySize, storageUsage, hostProps, indicesBuf_, indicesMem_);
+    createBuffer(sizeof(uint32_t) * numParticles_, storageUsage, hostProps,
+                 startBuf_, startMem_);
+
+    createBuffer(sizeof(SphParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                 hostProps, paramsBuf_, paramsMem_);
+    vkMapMemory(device_, paramsMem_, 0, sizeof(SphParams), 0, &paramsMapped_);
+  }
+
+  void createDescriptorSetLayout() {
+    // 8 SSBO bindings (0-4 sim, 6-8 spatial hash) + 1 UBO (5)
+    std::array<VkDescriptorSetLayoutBinding, 9> b{};
+    for (uint32_t i = 0; i < 9; i++) {
+      b[i].binding = i;
+      b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      b[i].descriptorCount = 1;
+      b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
+    // positions (0) and velocities (1) are also read by the vertex shader
+    b[0].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
+    b[1].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
+    // binding 5 is the uniform params block
+    b[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    b[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo ci{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    ci.bindingCount = (uint32_t)b.size();
+    ci.pBindings = b.data();
+    vkCheck(vkCreateDescriptorSetLayout(device_, &ci, nullptr,
+                                        &descriptorSetLayout_),
+            "vkCreateDescriptorSetLayout");
+  }
+
+  void createDescriptorPoolAndSet() {
+    std::array<VkDescriptorPoolSize, 2> sizes{};
+    sizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};
+    sizes[1] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
+    VkDescriptorPoolCreateInfo pi{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pi.maxSets = 1;
+    pi.poolSizeCount = (uint32_t)sizes.size();
+    pi.pPoolSizes = sizes.data();
+    vkCheck(vkCreateDescriptorPool(device_, &pi, nullptr, &descriptorPool_),
+            "vkCreateDescriptorPool");
+
+    VkDescriptorSetAllocateInfo ai{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = descriptorPool_;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &descriptorSetLayout_;
+    vkCheck(vkAllocateDescriptorSets(device_, &ai, &descriptorSet_),
+            "vkAllocateDescriptorSets");
+
+    // binding index -> buffer (index 5 is the UBO, handled specially)
+    VkBuffer bufs[9] = {positionsBuf_, velocitiesBuf_, predictedBuf_,
+                        densitiesBuf_, viscForceBuf_,  paramsBuf_,
+                        keysBuf_,      indicesBuf_,     startBuf_};
+    std::array<VkDescriptorBufferInfo, 9> infos{};
+    std::array<VkWriteDescriptorSet, 9> writes{};
+    for (uint32_t i = 0; i < 9; i++) {
+      infos[i] = {bufs[i], 0, VK_WHOLE_SIZE};
+      writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      writes[i].dstSet = descriptorSet_;
+      writes[i].dstBinding = i;
+      writes[i].descriptorCount = 1;
+      writes[i].descriptorType = (i == 5)
+                                     ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                     : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      writes[i].pBufferInfo = &infos[i];
+    }
+    vkUpdateDescriptorSets(device_, (uint32_t)writes.size(), writes.data(), 0,
+                           nullptr);
+  }
+
+  VkPipeline createComputePipeline(const std::string &spvName) {
+    auto code = readFile(std::string(SHADER_DIR) + "/" + spvName);
+    VkShaderModule module = createShaderModule(code);
+    VkPipelineShaderStageCreateInfo stage{
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage.module = module;
+    stage.pName = "main";
+    VkComputePipelineCreateInfo ci{
+        VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage = stage;
+    ci.layout = computePipelineLayout_;
+    VkPipeline pipeline;
+    vkCheck(vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &ci, nullptr,
+                                     &pipeline),
+            "vkCreateComputePipelines");
+    vkDestroyShaderModule(device_, module, nullptr);
+    return pipeline;
+  }
+
+  void createComputePipelines() {
+    // bitonic sort needs (k, j) push constants; the layout is shared by all
+    // compute pipelines (others simply don't declare the range).
+    VkPushConstantRange pcRange{};
+    pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcRange.offset = 0;
+    pcRange.size = sizeof(SortPush);
+
+    VkPipelineLayoutCreateInfo pl{
+        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pl.setLayoutCount = 1;
+    pl.pSetLayouts = &descriptorSetLayout_;
+    pl.pushConstantRangeCount = 1;
+    pl.pPushConstantRanges = &pcRange;
+    vkCheck(vkCreatePipelineLayout(device_, &pl, nullptr,
+                                   &computePipelineLayout_),
+            "vkCreatePipelineLayout(compute)");
+
+    computePipelines_[0] = createComputePipeline("sph_external.comp.spv");
+    computePipelines_[1] = createComputePipeline("sph_hash_keys.comp.spv");
+    computePipelines_[2] = createComputePipeline("sph_bitonic.comp.spv");
+    computePipelines_[3] = createComputePipeline("sph_start_reset.comp.spv");
+    computePipelines_[4] = createComputePipeline("sph_start_indices.comp.spv");
+    computePipelines_[5] = createComputePipeline("sph_density.comp.spv");
+    computePipelines_[6] = createComputePipeline("sph_pressure.comp.spv");
+    computePipelines_[7] = createComputePipeline("sph_viscosity.comp.spv");
+    computePipelines_[8] = createComputePipeline("sph_integrate.comp.spv");
   }
 
   void createCommandPoolAndBuffers() {
@@ -828,11 +1022,69 @@ private:
     }
   }
 
+  // Barrier so one compute pass's SSBO writes are visible to the next.
+  void ssboBarrier(VkCommandBuffer cmd) {
+    VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    b.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b, 0,
+                         nullptr, 0, nullptr);
+  }
+
+  void dispatchStage(VkCommandBuffer cmd, VkPipeline pipeline, uint32_t groups) {
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdDispatch(cmd, groups, 1, 1);
+    ssboBarrier(cmd);
+  }
+
+  void bitonicSort(VkCommandBuffer cmd, uint32_t groups) {
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      computePipelines_[2]);
+    for (uint32_t k = 2; k <= paddedCount_; k <<= 1) {
+      for (uint32_t j = k >> 1; j > 0; j >>= 1) {
+        SortPush push{k, j};
+        vkCmdPushConstants(cmd, computePipelineLayout_,
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SortPush),
+                           &push);
+        vkCmdDispatch(cmd, groups, 1, 1);
+        ssboBarrier(cmd);
+      }
+    }
+  }
+
   void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex,
-                           const PushConstants &pc) {
+                           const PushConstants &pc, int substeps) {
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkCheck(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer");
 
+    // compute stage
+    // advance the simulation by substeps, each of which runs the full compute
+    const uint32_t groupsN = (numParticles_ + 255u) / 256u;
+    const uint32_t groupsP = (paddedCount_ + 255u) / 256u;
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            computePipelineLayout_, 0, 1, &descriptorSet_, 0,
+                            nullptr);
+    for (int s = 0; s < substeps; s++) {
+      dispatchStage(cmd, computePipelines_[0], groupsN); // external forces
+      dispatchStage(cmd, computePipelines_[1], groupsP); // build cell keys
+      bitonicSort(cmd, groupsP);                          // sort keys+indices
+      dispatchStage(cmd, computePipelines_[3], groupsN); // reset startIndices
+      dispatchStage(cmd, computePipelines_[4], groupsN); // fill startIndices
+      dispatchStage(cmd, computePipelines_[5], groupsN); // density
+      dispatchStage(cmd, computePipelines_[6], groupsN); // pressure
+      dispatchStage(cmd, computePipelines_[7], groupsN); // viscosity force
+      dispatchStage(cmd, computePipelines_[8], groupsN); // integrate + collide
+    }
+
+    VkMemoryBarrier toVertex{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    toVertex.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toVertex.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &toVertex, 0,
+                         nullptr, 0, nullptr);
+
+    // rendering stage
     std::array<VkClearValue, 2> clears{};
     clears[0].color = {{0.02f, 0.03f, 0.06f, 1.0f}};
     clears[1].depthStencil = {1.0f, 0};
@@ -861,14 +1113,15 @@ private:
 
     vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                        sizeof(PushConstants), &pc);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipelineLayout_, 0, 1, &descriptorSet_, 0, nullptr);
 
-    VkBuffer vbs[] = {quadBuffer_, instanceBuffers_[currentFrame_]};
-    VkDeviceSize offsets[] = {0, 0};
-    vkCmdBindVertexBuffers(cmd, 0, 2, vbs, offsets);
+    VkBuffer vbs[] = {quadBuffer_};
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, vbs, offsets);
 
-    uint32_t count = instanceCount_[currentFrame_];
-    if (count > 0)
-      vkCmdDraw(cmd, 6, count, 0, 0);
+    if (numParticles_ > 0)
+      vkCmdDraw(cmd, 6, numParticles_, 0, 0);
 
     vkCmdEndRenderPass(cmd);
     vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
