@@ -767,7 +767,6 @@ private:
   }
 
   void createQuadVertexBuffer() {
-    // Two triangles covering [-1,1]^2.
     const float quad[] = {
         -1.f, -1.f, 1.f, -1.f, 1.f, 1.f,
         -1.f, -1.f, 1.f,  1.f, -1.f, 1.f,

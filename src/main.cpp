@@ -12,7 +12,7 @@ using namespace linalg::aliases;
 constexpr float PI = 3.14159265358979f;
 constexpr float DegToRad = PI / 180.0f;
 constexpr float ANGFACT = 0.2f;    // mouse look sensitivity
-constexpr float moveSpeed = 1.5f;  // keyboard movement (units per second)
+constexpr float moveSpeed = 1.5f;  // keyboard movement 
 
 static float3 globalEye = float3(0.0f, 0.0f, 4.0f);
 static float3 globalLookat = float3(0.0f, 0.0f, 0.0f);
@@ -67,7 +67,6 @@ static void cursorPosFunc(GLFWwindow *, double mouse_x, double mouse_y) {
     const float yfact = -ANGFACT * float(mouse_x - m_mouseX);
     float3 v = globalViewDir;
 
-    // rotate vector v about axis w by angle theta (Rodrigues, w unit-length)
     struct {
       float3 operator()(float theta, const float3 &v, const float3 &w) {
         const float c = cosf(theta);

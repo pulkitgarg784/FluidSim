@@ -69,9 +69,6 @@ struct Particle {
   }
 };
 
-// ---------------------------------------------------------------------------
-// Fluid simulation
-// ---------------------------------------------------------------------------
 class FluidSim {
 public:
   std::vector<Particle> particles;
@@ -83,9 +80,6 @@ public:
     densities.assign(numParticles, 0.0f);
     viscosityForces.assign(numParticles, float3(0.0f));
 
-    // Two-column demo: place half the particles in a slab at the -X edge and
-    // half at the +X edge, filling the full height/depth. Gravity pulls both
-    // columns down; the fluid then flows inward and meets in the middle.
     const float3 half = boundsSize * 0.5f;
     const float slab = boundsSize.x * 0.2f; // slab thickness at each end
     for (int i = 0; i < numParticles; i++) {
@@ -109,7 +103,7 @@ public:
   }
 
   void simulationStep() {
-    // 1. apply gravity, predict lookahead positions used for SPH sampling
+    // gravity + lookahead predictedPosition 
     for (int i = 0; i < numParticles; i++) {
       particles[i].velocity += gravity * deltaT;
       particles[i].predictedPosition =
@@ -117,20 +111,20 @@ public:
     }
     updateDensities();
 
-    // 2. pressure force -> acceleration -> velocity
+    // pressure + acceleration + velocity 
     for (int i = 0; i < numParticles; i++) {
       float3 pressureForce = calculatePressureForce(i);
       float3 pressureAcceleration = pressureForce / densities[i];
       particles[i].velocity += pressureAcceleration * deltaT;
     }
 
-    // 2b. viscosity: pull each velocity toward the neighbourhood average
+    // viscosity. pull towards neighbour avergae
     for (int i = 0; i < numParticles; i++)
       viscosityForces[i] = calculateViscosityForce(i);
     for (int i = 0; i < numParticles; i++)
       particles[i].velocity += viscosityForces[i] * deltaT;
 
-    // 3. advance positions and resolve wall collisions
+    // set position and check collision
     for (int i = 0; i < numParticles; i++) {
       particles[i].position += particles[i].velocity * deltaT;
       particles[i].resolveCollisions();
@@ -142,7 +136,6 @@ public:
       densities[i] = calculateDensity(particles[i].predictedPosition);
   }
 
-  // 3D "spiky" smoothing kernel: (r - d)^2 normalized over the support sphere.
   static float smoothingKernel(float radius, float dst) {
     if (dst >= radius)
       return 0.0f;
@@ -161,7 +154,6 @@ public:
     return density;
   }
 
-  // derivative of the spiky kernel wrt distance
   static float smoothingKernelDerivative(float dst, float radius) {
     if (dst >= radius)
       return 0.0f;
@@ -190,7 +182,7 @@ public:
       float dst = length(offset);
       float3 dir;
       if (dst < Epsilon) {
-        // coincident particles: push in a random direction on the unit sphere
+        // push overlapping particles in random direction on unit spehere
         float z = PCG32::rand() * 2.0f - 1.0f;
         float a = PCG32::rand() * 2.0f * PI;
         float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
@@ -207,7 +199,6 @@ public:
     return pressureForce;
   }
 
-  // poly6-style kernel used for viscosity
   static float viscosityKernel(float radius, float dst) {
     if (dst >= radius)
       return 0.0f;
