@@ -121,7 +121,7 @@ int main() {
 
   vkr::VulkanRenderer renderer;
   try {
-    renderer.init(width, height, "CS488 - SPH Fluid (Vulkan)",
+    renderer.init(width, height, "CS488 Final Project",
                   (uint32_t)sph::numParticles);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "Renderer init failed: %s\n", e.what());

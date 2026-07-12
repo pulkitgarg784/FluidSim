@@ -15,7 +15,7 @@ constexpr float PI = 3.14159265358979f;
 // integration
 constexpr float deltaT = 0.002f;
 constexpr float3 gravity = float3(0.0f, -9.8f, 0.0f);
-constexpr int numParticles = 2000;
+constexpr int numParticles = 3000;
 
 // SPH parameters
 constexpr float smoothingRadius = 0.2f;      // kernel support radius
@@ -28,6 +28,14 @@ constexpr float viscosityStrength = 0.001f;  // neighbour velocity averaging
 constexpr int simIterationsPerFrame = 3;     // physics substeps per rendered frame
 
 constexpr float Epsilon = 5e-5f;
+
+// Precomputed kernel normalization factors 
+constexpr float sr2 = smoothingRadius * smoothingRadius;
+constexpr float sr5 = sr2 * sr2 * smoothingRadius;
+constexpr float sr9 = sr2 * sr2 * sr2 * sr2 * smoothingRadius;
+constexpr float Pow2Scale = 15.0f / (2.0f * PI * sr5);
+constexpr float Pow2GradScale = 15.0f / (PI * sr5);
+constexpr float viscocityScale = 315.0f / (64.0f * PI * sr9);
 
 namespace PCG32 {
 static uint64_t mcg_state = 0xcafef00dd15ea5e5u; // must be odd
@@ -75,10 +83,20 @@ public:
   std::vector<float> densities; // cached density per particle
   std::vector<float3> viscosityForces;
 
+  // Spatial hash for neighbour search. Each particle is assigned a cell keyS
+  struct SpatialHash {
+    uint32_t index;
+    uint32_t key; // hashed cell key
+  };
+  std::vector<SpatialHash> spatialEntries; // one per particle, sorted by key
+  std::vector<uint32_t> startIndices; // first entry index for each key, or UINT32_MAX
+
   void initialize() {
     particles.resize(numParticles);
     densities.assign(numParticles, 0.0f);
     viscosityForces.assign(numParticles, float3(0.0f));
+    spatialEntries.assign(numParticles, SpatialHash{0u, 0u});
+    startIndices.assign(numParticles, UINT32_MAX);
 
     const float3 half = boundsSize * 0.5f;
     const float slab = boundsSize.x * 0.2f; // slab thickness at each end
@@ -109,6 +127,9 @@ public:
       particles[i].predictedPosition =
           particles[i].position + particles[i].velocity * deltaT;
     }
+
+    // rebuild the neighbour grid on the predicted positions
+    updateSpatialHash();
     updateDensities();
 
     // pressure + acceleration + velocity 
@@ -136,29 +157,93 @@ public:
       densities[i] = calculateDensity(particles[i].predictedPosition);
   }
 
+  // cell size = smoothingRadius
+  static int3 cellCoord(const float3 &p) {
+    return int3((int)std::floor(p.x / smoothingRadius),
+                (int)std::floor(p.y / smoothingRadius),
+                (int)std::floor(p.z / smoothingRadius));
+  }
+
+  static uint32_t keyFromCell(int cx, int cy, int cz) {
+    uint32_t a = (uint32_t)(int32_t)cx * 15823u;
+    uint32_t b = (uint32_t)(int32_t)cy * 9737333u;
+    uint32_t c = (uint32_t)(int32_t)cz * 440817757u;
+    return (a + b + c) % (uint32_t)numParticles;
+  }
+
+  // Assign each particle a cell key, sort by key, and record bucket starts.
+  void updateSpatialHash() {
+    for (int i = 0; i < numParticles; i++) {
+      int3 c = cellCoord(particles[i].predictedPosition);
+      spatialEntries[i].index = (uint32_t)i;
+      spatialEntries[i].key = keyFromCell(c.x, c.y, c.z);
+    }
+    std::sort(spatialEntries.begin(), spatialEntries.end(),
+              [](const SpatialHash &a, const SpatialHash &b) {
+                return a.key < b.key;
+              });
+    std::fill(startIndices.begin(), startIndices.end(), UINT32_MAX);
+    for (int i = 0; i < numParticles; i++) {
+      uint32_t key = spatialEntries[i].key;
+      uint32_t prev = (i == 0) ? UINT32_MAX : spatialEntries[i - 1].key;
+      if (key != prev)
+        startIndices[key] = (uint32_t)i;
+    }
+  }
+
+  template <typename Fn>
+  void forEachNeighbour(const float3 &point, Fn &&fn) const {
+    const int3 center = cellCoord(point);
+    // can be 27 at most surroudning cells
+    uint32_t keys[27];
+    int keyCount = 0;
+    for (int dz = -1; dz <= 1; dz++)
+      for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+          uint32_t key = keyFromCell(center.x + dx, center.y + dy, center.z + dz);
+          bool seen = false;
+          for (int k = 0; k < keyCount; k++)
+            if (keys[k] == key) {
+              seen = true;
+              break;
+            }
+          if (!seen)
+            keys[keyCount++] = key;
+        }
+
+    for (int k = 0; k < keyCount; k++) {
+      uint32_t key = keys[k];
+      uint32_t start = startIndices[key];
+      if (start == UINT32_MAX) // invalid cell
+        continue;
+      for (uint32_t e = start; e < (uint32_t)numParticles; e++) {
+        if (spatialEntries[e].key != key)
+          break;
+        fn((int)spatialEntries[e].index);
+      }
+    }
+  }
+
   static float smoothingKernel(float radius, float dst) {
     if (dst >= radius)
       return 0.0f;
-    float volume = (2.0f * PI * std::pow(radius, 5)) / 15.0f;
     float value = radius - dst;
-    return (value * value) / volume;
+    return value * value * Pow2Scale;
   }
 
   float calculateDensity(const float3 &samplePoint) const {
     float density = 0.0f;
-    for (const Particle &p : particles) {
-      float dst = length(p.predictedPosition - samplePoint);
-      float influence = smoothingKernel(smoothingRadius, dst);
-      density += particleMass * influence;
-    }
+    forEachNeighbour(samplePoint, [&](int j) {
+      float dst = length(particles[j].predictedPosition - samplePoint);
+      density += particleMass * smoothingKernel(smoothingRadius, dst);
+    });
     return density;
   }
 
   static float smoothingKernelDerivative(float dst, float radius) {
     if (dst >= radius)
       return 0.0f;
-    float scale = 15.0f / (PI * std::pow(radius, 5));
-    return (dst - radius) * scale; // negative inside the radius
+    return (dst - radius) * Pow2GradScale; // negative inside the radius
   }
 
   static float convertDensityToPressure(float density) {
@@ -174,11 +259,11 @@ public:
 
   float3 calculatePressureForce(int particleIndex) const {
     float3 pressureForce = float3(0.0f);
-    for (int i = 0; i < numParticles; i++) {
+    const float3 samplePoint = particles[particleIndex].predictedPosition;
+    forEachNeighbour(samplePoint, [&](int i) {
       if (i == particleIndex)
-        continue;
-      float3 offset = particles[i].predictedPosition -
-                      particles[particleIndex].predictedPosition;
+        return;
+      float3 offset = particles[i].predictedPosition - samplePoint;
       float dst = length(offset);
       float3 dir;
       if (dst < Epsilon) {
@@ -195,29 +280,28 @@ public:
       float sharedPressure =
           calculateSharedPressure(density, densities[particleIndex]);
       pressureForce += sharedPressure * dir * slope * particleMass / density;
-    }
+    });
     return pressureForce;
   }
 
   static float viscosityKernel(float radius, float dst) {
     if (dst >= radius)
       return 0.0f;
-    float volume = (64.0f * PI * std::pow(radius, 9)) / 315.0f;
     float v = radius * radius - dst * dst;
-    return (v * v * v) / volume;
+    return v * v * v * viscocityScale;
   }
 
   float3 calculateViscosityForce(int particleIndex) const {
     float3 viscosityForce = float3(0.0f);
     const float3 pos = particles[particleIndex].predictedPosition;
     const float3 vel = particles[particleIndex].velocity;
-    for (int i = 0; i < numParticles; i++) {
+    forEachNeighbour(pos, [&](int i) {
       if (i == particleIndex)
-        continue;
+        return;
       float dst = length(particles[i].predictedPosition - pos);
       float influence = viscosityKernel(smoothingRadius, dst);
       viscosityForce += (particles[i].velocity - vel) * influence;
-    }
+    });
     return viscosityForce * viscosityStrength;
   }
 };
