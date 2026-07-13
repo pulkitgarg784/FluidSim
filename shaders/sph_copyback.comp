@@ -26,37 +26,15 @@ layout(std140, binding = 5) uniform Params {
 layout(std430, binding = 6) buffer SpatialKeys    { uint spatialKeys[];    };
 layout(std430, binding = 7) buffer SpatialIndices { uint spatialIndices[]; };
 layout(std430, binding = 8) buffer StartIndices   { uint startIndices[];   };
+layout(std430, binding = 9)  buffer SortedPos  { vec4 sortedPos[];  };
+layout(std430, binding = 10) buffer SortedVel  { vec4 sortedVel[];  };
+layout(std430, binding = 11) buffer SortedPred { vec4 sortedPred[]; };
 
-ivec3 cellCoord(vec3 p) { return ivec3(floor(p / P.smoothingRadius)); }
-uint cellKey(ivec3 c) {
-  uint a = uint(c.x) * 15823u;
-  uint b = uint(c.y) * 9737333u;
-  uint cc = uint(c.z) * 440817757u;
-  return (a + b + cc) % P.numParticles;
-}
-
+// Copy the reordered data back into the primary buffers in sorted order
 void main() {
-  uint idx = gl_GlobalInvocationID.x;
-  if (idx >= P.numParticles) return;
-
-  vec3 pi = predicted[idx].xyz;
-  ivec3 center = cellCoord(pi);
-  float density = 0.0;
-
-  for (int dz = -1; dz <= 1; dz++)
-  for (int dy = -1; dy <= 1; dy++)
-  for (int dx = -1; dx <= 1; dx++) {
-    uint key = cellKey(center + ivec3(dx, dy, dz));
-    uint start = startIndices[key];
-    if (start == 0xffffffffu) continue;
-    for (uint e = start; e < P.numParticles && spatialKeys[e] == key; e++) {
-      uint j = e; // data is now in sorted order
-      float dst = length(predicted[j].xyz - pi);
-      if (dst < P.smoothingRadius) {
-        float v = P.smoothingRadius - dst;
-        density += P.particleMass * (v * v * P.spikyPow2Scale);
-      }
-    }
-  }
-  densities[idx] = density;
+  uint e = gl_GlobalInvocationID.x;
+  if (e >= P.numParticles) return;
+  positions[e]  = sortedPos[e];
+  velocities[e] = sortedVel[e];
+  predicted[e]  = sortedPred[e];
 }

@@ -14,7 +14,7 @@ constexpr float DegToRad = PI / 180.0f;
 constexpr float ANGFACT = 0.2f;    // mouse look sensitivity
 constexpr float moveSpeed = 1.5f;  // keyboard movement 
 
-static float3 globalEye = float3(0.0f, 0.0f, 4.0f);
+static float3 globalEye = float3(0.0f, 0.0f, 14.0f);
 static float3 globalLookat = float3(0.0f, 0.0f, 0.0f);
 static float3 globalUp = normalize(float3(0.0f, 1.0f, 0.0f));
 static float3 globalViewDir = normalize(globalLookat - globalEye);

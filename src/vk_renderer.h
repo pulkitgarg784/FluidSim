@@ -17,6 +17,8 @@
 #include "linalg.h"
 using namespace linalg::aliases;
 
+#include "vk_radix_sort.h"
+
 #ifndef SHADER_DIR
 #define SHADER_DIR "shaders"
 #endif
@@ -97,6 +99,7 @@ public:
     createDepthResources();
     createFramebuffers();
     createComputeBuffers();
+    createSorter();
     createDescriptorSetLayout();
     createDescriptorPoolAndSet();
     createGraphicsPipeline();
@@ -117,12 +120,12 @@ public:
     std::memcpy(paramsMapped_, &params, sizeof(SphParams));
   }
 
-  // 4th is unused, but we use float4 to match the shader layout
   void uploadInitialState(const std::vector<float4> &positions,
                           const std::vector<float4> &velocities) {
     uint32_t n = std::min<uint32_t>(numParticles_, (uint32_t)positions.size());
-    std::memcpy(positionsMapped_, positions.data(), n * sizeof(float4));
-    std::memcpy(velocitiesMapped_, velocities.data(), n * sizeof(float4));
+    VkDeviceSize size = n * sizeof(float4);
+    uploadViaStaging(positionsBuf_, positions.data(), size);
+    uploadViaStaging(velocitiesBuf_, velocities.data(), size);
   }
 
   // Advance the simulation `substeps` times on the GPU, then draw one frame.
@@ -216,6 +219,14 @@ public:
     destroyBuffer(keysBuf_, keysMem_);
     destroyBuffer(indicesBuf_, indicesMem_);
     destroyBuffer(startBuf_, startMem_);
+    destroyBuffer(sortedPosBuf_, sortedPosMem_);
+    destroyBuffer(sortedVelBuf_, sortedVelMem_);
+    destroyBuffer(sortedPredBuf_, sortedPredMem_);
+    destroyBuffer(sortStorageBuf_, sortStorageMem_);
+    if (sorter_) {
+      vrdxDestroySorter(sorter_);
+      sorter_ = VK_NULL_HANDLE;
+    }
     destroyBuffer(paramsBuf_, paramsMem_);
 
     if (quadBuffer_) {
@@ -249,6 +260,44 @@ public:
       vkFreeMemory(device_, mem, nullptr);
       mem = VK_NULL_HANDLE;
     }
+  }
+
+  void uploadViaStaging(VkBuffer dst, const void *src, VkDeviceSize size) {
+    if (size == 0) return;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+    createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 staging, stagingMem);
+    void *mapped = nullptr;
+    vkMapMemory(device_, stagingMem, 0, size, 0, &mapped);
+    std::memcpy(mapped, src, (size_t)size);
+    vkUnmapMemory(device_, stagingMem);
+
+    VkCommandBufferAllocateInfo ai{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ai.commandPool = commandPool_;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    VkCommandBuffer cmd;
+    vkAllocateCommandBuffers(device_, &ai, &cmd);
+
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+    VkBufferCopy region{0, 0, size};
+    vkCmdCopyBuffer(cmd, staging, dst, 1, &region);
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    vkQueueSubmit(graphicsQueue_, 1, &submit, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphicsQueue_);
+
+    vkFreeCommandBuffers(device_, commandPool_, 1, &cmd);
+    destroyBuffer(staging, stagingMem);
   }
 
 private:
@@ -285,8 +334,8 @@ private:
   uint32_t numParticles_ = 0;
   uint32_t paddedCount_ = 0; // numParticles rounded up to a power of two
 
-  VkBuffer positionsBuf_ = VK_NULL_HANDLE;   VkDeviceMemory positionsMem_ = VK_NULL_HANDLE;   void *positionsMapped_ = nullptr;
-  VkBuffer velocitiesBuf_ = VK_NULL_HANDLE;  VkDeviceMemory velocitiesMem_ = VK_NULL_HANDLE;  void *velocitiesMapped_ = nullptr;
+  VkBuffer positionsBuf_ = VK_NULL_HANDLE;   VkDeviceMemory positionsMem_ = VK_NULL_HANDLE;
+  VkBuffer velocitiesBuf_ = VK_NULL_HANDLE;  VkDeviceMemory velocitiesMem_ = VK_NULL_HANDLE;
   VkBuffer predictedBuf_ = VK_NULL_HANDLE;   VkDeviceMemory predictedMem_ = VK_NULL_HANDLE;
   VkBuffer densitiesBuf_ = VK_NULL_HANDLE;   VkDeviceMemory densitiesMem_ = VK_NULL_HANDLE;
   VkBuffer viscForceBuf_ = VK_NULL_HANDLE;   VkDeviceMemory viscForceMem_ = VK_NULL_HANDLE;
@@ -296,17 +345,23 @@ private:
   VkBuffer indicesBuf_ = VK_NULL_HANDLE;     VkDeviceMemory indicesMem_ = VK_NULL_HANDLE;
   VkBuffer startBuf_ = VK_NULL_HANDLE;       VkDeviceMemory startMem_ = VK_NULL_HANDLE;
 
+  // sorted-order scratch buffers
+  VkBuffer sortedPosBuf_ = VK_NULL_HANDLE;   VkDeviceMemory sortedPosMem_ = VK_NULL_HANDLE;
+  VkBuffer sortedVelBuf_ = VK_NULL_HANDLE;   VkDeviceMemory sortedVelMem_ = VK_NULL_HANDLE;
+  VkBuffer sortedPredBuf_ = VK_NULL_HANDLE;  VkDeviceMemory sortedPredMem_ = VK_NULL_HANDLE;
+
+  VrdxSorter sorter_ = VK_NULL_HANDLE;
+  VkBuffer sortStorageBuf_ = VK_NULL_HANDLE; VkDeviceMemory sortStorageMem_ = VK_NULL_HANDLE;
+
   VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;
   VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
   VkDescriptorSet descriptorSet_ = VK_NULL_HANDLE;
 
-  struct SortPush { uint32_t k; uint32_t j; };
-
   VkPipelineLayout computePipelineLayout_ = VK_NULL_HANDLE;
 
-  // 0:external 1:hashKeys 2:bitonic 3:startReset 4:startIndices
-  // 5:density 6:pressure 7:viscosity 8:integrate
-  std::array<VkPipeline, 9> computePipelines_{};
+  // 0:external 1:hashKeys 2:reorder 3:copyback 4:startReset 5:startIndices
+  // 6:density 7:pressure 8:viscosity 9:integrate
+  std::array<VkPipeline, 10> computePipelines_{};
 
   VkCommandPool commandPool_ = VK_NULL_HANDLE;
   std::array<VkCommandBuffer, kMaxFramesInFlight> commandBuffers_{};
@@ -339,7 +394,7 @@ private:
     app.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     app.pEngineName = "sph-vk";
     app.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    app.apiVersion = VK_API_VERSION_1_2;
+    app.apiVersion = VK_API_VERSION_1_4;
 
     uint32_t glfwExtCount = 0;
     const char **glfwExts = glfwGetRequiredInstanceExtensions(&glfwExtCount);
@@ -423,9 +478,8 @@ private:
       queueInfos.push_back(qi);
     }
 
-    // Required device extensions. Add portability_subset if the device
-    // advertises it (mandatory to enable on MoltenVK when present).
-    std::vector<const char *> deviceExts = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    std::vector<const char *> deviceExts = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                                            VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
     #if VKR_OS_MACOS
     uint32_t extCount = 0;
     vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extCount,
@@ -441,12 +495,19 @@ private:
     }
     #endif
 
-    VkPhysicalDeviceFeatures features{};
+    VkPhysicalDeviceVulkan13Features features13{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    features13.synchronization2 = VK_TRUE;
+    VkPhysicalDeviceVulkan14Features features14{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
+    features14.pNext = &features13;
+    features14.pushDescriptor = VK_TRUE;
 
     VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    ci.pNext = &features14;
     ci.queueCreateInfoCount = (uint32_t)queueInfos.size();
     ci.pQueueCreateInfos = queueInfos.data();
-    ci.pEnabledFeatures = &features;
+    ci.pEnabledFeatures = nullptr; // features supplied via pNext
     ci.enabledExtensionCount = (uint32_t)deviceExts.size();
     ci.ppEnabledExtensionNames = deviceExts.data();
     vkCheck(vkCreateDevice(physicalDevice_, &ci, nullptr, &device_),
@@ -846,39 +907,53 @@ private:
   }
 
   void createComputeBuffers() {
-    paddedCount_ = 1;
-    while (paddedCount_ < numParticles_) paddedCount_ <<= 1;
-
-    const VkBufferUsageFlags storageUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    const VkMemoryPropertyFlags hostProps =
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    paddedCount_ = numParticles_;
+    const VkMemoryPropertyFlags devLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    const VkBufferUsageFlags storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    const VkBufferUsageFlags storageDst =
+        storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     VkDeviceSize vec4Size = sizeof(float) * 4 * numParticles_;
     VkDeviceSize fltSize = sizeof(float) * numParticles_;
+    VkDeviceSize uintSize = sizeof(uint32_t) * numParticles_;
 
-    createBuffer(vec4Size, storageUsage, hostProps, positionsBuf_, positionsMem_);
-    vkMapMemory(device_, positionsMem_, 0, vec4Size, 0, &positionsMapped_);
-    createBuffer(vec4Size, storageUsage, hostProps, velocitiesBuf_, velocitiesMem_);
-    vkMapMemory(device_, velocitiesMem_, 0, vec4Size, 0, &velocitiesMapped_);
-    createBuffer(vec4Size, storageUsage, hostProps, predictedBuf_, predictedMem_);
-    createBuffer(fltSize, storageUsage, hostProps, densitiesBuf_, densitiesMem_);
-    createBuffer(vec4Size, storageUsage, hostProps, viscForceBuf_, viscForceMem_);
+    createBuffer(vec4Size, storageDst, devLocal, positionsBuf_, positionsMem_);
+    createBuffer(vec4Size, storageDst, devLocal, velocitiesBuf_, velocitiesMem_);
+    createBuffer(vec4Size, storage, devLocal, predictedBuf_, predictedMem_);
+    createBuffer(fltSize, storage, devLocal, densitiesBuf_, densitiesMem_);
+    createBuffer(vec4Size, storage, devLocal, viscForceBuf_, viscForceMem_);
+    createBuffer(uintSize, storage, devLocal, keysBuf_, keysMem_);
+    createBuffer(uintSize, storage, devLocal, indicesBuf_, indicesMem_);
+    createBuffer(uintSize, storage, devLocal, startBuf_, startMem_);
 
-    VkDeviceSize keySize = sizeof(uint32_t) * paddedCount_;
-    createBuffer(keySize, storageUsage, hostProps, keysBuf_, keysMem_);
-    createBuffer(keySize, storageUsage, hostProps, indicesBuf_, indicesMem_);
-    createBuffer(sizeof(uint32_t) * numParticles_, storageUsage, hostProps,
-                 startBuf_, startMem_);
+    createBuffer(vec4Size, storage, devLocal, sortedPosBuf_, sortedPosMem_);
+    createBuffer(vec4Size, storage, devLocal, sortedVelBuf_, sortedVelMem_);
+    createBuffer(vec4Size, storage, devLocal, sortedPredBuf_, sortedPredMem_);
 
     createBuffer(sizeof(SphParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                 hostProps, paramsBuf_, paramsMem_);
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 paramsBuf_, paramsMem_);
     vkMapMemory(device_, paramsMem_, 0, sizeof(SphParams), 0, &paramsMapped_);
   }
 
+  void createSorter() {
+    VrdxSorterCreateInfo ci{};
+    ci.physicalDevice = physicalDevice_;
+    ci.device = device_;
+    ci.pipelineCache = VK_NULL_HANDLE;
+    vkCheck(vrdxCreateSorter(&ci, &sorter_), "vrdxCreateSorter");
+
+    VrdxSorterStorageRequirements req{};
+    vrdxGetSorterStorageRequirements(sorter_, numParticles_,
+                                     VRDX_SORT_MODE_KEY_VALUE, &req);
+    createBuffer(req.size, req.usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                 sortStorageBuf_, sortStorageMem_);
+  }
+
   void createDescriptorSetLayout() {
-    // 8 SSBO bindings (0-4 sim, 6-8 spatial hash) + 1 UBO (5)
-    std::array<VkDescriptorSetLayoutBinding, 9> b{};
-    for (uint32_t i = 0; i < 9; i++) {
+    // bindings 0-4 sim, 5 UBO, 6-8 spatial hash, 9-11 sorted scratch
+    std::array<VkDescriptorSetLayoutBinding, 12> b{};
+    for (uint32_t i = 0; i < 12; i++) {
       b[i].binding = i;
       b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       b[i].descriptorCount = 1;
@@ -902,7 +977,7 @@ private:
 
   void createDescriptorPoolAndSet() {
     std::array<VkDescriptorPoolSize, 2> sizes{};
-    sizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};
+    sizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11};
     sizes[1] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
     VkDescriptorPoolCreateInfo pi{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -921,12 +996,13 @@ private:
             "vkAllocateDescriptorSets");
 
     // binding index -> buffer (index 5 is the UBO, handled specially)
-    VkBuffer bufs[9] = {positionsBuf_, velocitiesBuf_, predictedBuf_,
-                        densitiesBuf_, viscForceBuf_,  paramsBuf_,
-                        keysBuf_,      indicesBuf_,     startBuf_};
-    std::array<VkDescriptorBufferInfo, 9> infos{};
-    std::array<VkWriteDescriptorSet, 9> writes{};
-    for (uint32_t i = 0; i < 9; i++) {
+    VkBuffer bufs[12] = {positionsBuf_, velocitiesBuf_, predictedBuf_,
+                         densitiesBuf_, viscForceBuf_,  paramsBuf_,
+                         keysBuf_,      indicesBuf_,     startBuf_,
+                         sortedPosBuf_, sortedVelBuf_,   sortedPredBuf_};
+    std::array<VkDescriptorBufferInfo, 12> infos{};
+    std::array<VkWriteDescriptorSet, 12> writes{};
+    for (uint32_t i = 0; i < 12; i++) {
       infos[i] = {bufs[i], 0, VK_WHOLE_SIZE};
       writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       writes[i].dstSet = descriptorSet_;
@@ -962,32 +1038,24 @@ private:
   }
 
   void createComputePipelines() {
-    // bitonic sort needs (k, j) push constants; the layout is shared by all
-    // compute pipelines (others simply don't declare the range).
-    VkPushConstantRange pcRange{};
-    pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pcRange.offset = 0;
-    pcRange.size = sizeof(SortPush);
-
     VkPipelineLayoutCreateInfo pl{
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pl.setLayoutCount = 1;
     pl.pSetLayouts = &descriptorSetLayout_;
-    pl.pushConstantRangeCount = 1;
-    pl.pPushConstantRanges = &pcRange;
     vkCheck(vkCreatePipelineLayout(device_, &pl, nullptr,
                                    &computePipelineLayout_),
             "vkCreatePipelineLayout(compute)");
 
     computePipelines_[0] = createComputePipeline("sph_external.comp.spv");
     computePipelines_[1] = createComputePipeline("sph_hash_keys.comp.spv");
-    computePipelines_[2] = createComputePipeline("sph_bitonic.comp.spv");
-    computePipelines_[3] = createComputePipeline("sph_start_reset.comp.spv");
-    computePipelines_[4] = createComputePipeline("sph_start_indices.comp.spv");
-    computePipelines_[5] = createComputePipeline("sph_density.comp.spv");
-    computePipelines_[6] = createComputePipeline("sph_pressure.comp.spv");
-    computePipelines_[7] = createComputePipeline("sph_viscosity.comp.spv");
-    computePipelines_[8] = createComputePipeline("sph_integrate.comp.spv");
+    computePipelines_[2] = createComputePipeline("sph_reorder.comp.spv");
+    computePipelines_[3] = createComputePipeline("sph_copyback.comp.spv");
+    computePipelines_[4] = createComputePipeline("sph_start_reset.comp.spv");
+    computePipelines_[5] = createComputePipeline("sph_start_indices.comp.spv");
+    computePipelines_[6] = createComputePipeline("sph_density.comp.spv");
+    computePipelines_[7] = createComputePipeline("sph_pressure.comp.spv");
+    computePipelines_[8] = createComputePipeline("sph_viscosity.comp.spv");
+    computePipelines_[9] = createComputePipeline("sph_integrate.comp.spv");
   }
 
   void createCommandPoolAndBuffers() {
@@ -1038,19 +1106,15 @@ private:
     ssboBarrier(cmd);
   }
 
-  void bitonicSort(VkCommandBuffer cmd, uint32_t groups) {
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                      computePipelines_[2]);
-    for (uint32_t k = 2; k <= paddedCount_; k <<= 1) {
-      for (uint32_t j = k >> 1; j > 0; j >>= 1) {
-        SortPush push{k, j};
-        vkCmdPushConstants(cmd, computePipelineLayout_,
-                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SortPush),
-                           &push);
-        vkCmdDispatch(cmd, groups, 1, 1);
-        ssboBarrier(cmd);
-      }
-    }
+  void radixSort(VkCommandBuffer cmd) {
+    VrdxSortInfo info{};
+    info.elementCount = numParticles_;
+    info.keysBuffer = keysBuf_;
+    info.valuesBuffer = indicesBuf_;
+    info.storageBuffer = sortStorageBuf_;
+    info.queryPool = VK_NULL_HANDLE;
+    vrdxCmdSort(cmd, sorter_, &info);
+    ssboBarrier(cmd);
   }
 
   void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex,
@@ -1061,20 +1125,24 @@ private:
     // compute stage
     // advance the simulation by substeps, each of which runs the full compute
     const uint32_t groupsN = (numParticles_ + 255u) / 256u;
-    const uint32_t groupsP = (paddedCount_ + 255u) / 256u;
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             computePipelineLayout_, 0, 1, &descriptorSet_, 0,
                             nullptr);
     for (int s = 0; s < substeps; s++) {
       dispatchStage(cmd, computePipelines_[0], groupsN); // external forces
-      dispatchStage(cmd, computePipelines_[1], groupsP); // build cell keys
-      bitonicSort(cmd, groupsP);                          // sort keys+indices
-      dispatchStage(cmd, computePipelines_[3], groupsN); // reset startIndices
-      dispatchStage(cmd, computePipelines_[4], groupsN); // fill startIndices
-      dispatchStage(cmd, computePipelines_[5], groupsN); // density
-      dispatchStage(cmd, computePipelines_[6], groupsN); // pressure
-      dispatchStage(cmd, computePipelines_[7], groupsN); // viscosity force
-      dispatchStage(cmd, computePipelines_[8], groupsN); // integrate + collide
+      dispatchStage(cmd, computePipelines_[1], groupsN); // build cell keys
+      radixSort(cmd);                                     // sort keys+indices
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                              computePipelineLayout_, 0, 1, &descriptorSet_, 0,
+                              nullptr);
+      dispatchStage(cmd, computePipelines_[2], groupsN); // gather into sorted
+      dispatchStage(cmd, computePipelines_[3], groupsN); // copy back (now sorted)
+      dispatchStage(cmd, computePipelines_[4], groupsN); // reset startIndices
+      dispatchStage(cmd, computePipelines_[5], groupsN); // fill startIndices
+      dispatchStage(cmd, computePipelines_[6], groupsN); // density
+      dispatchStage(cmd, computePipelines_[7], groupsN); // pressure
+      dispatchStage(cmd, computePipelines_[8], groupsN); // viscosity force
+      dispatchStage(cmd, computePipelines_[9], groupsN); // integrate + collide
     }
 
     VkMemoryBarrier toVertex{VK_STRUCTURE_TYPE_MEMORY_BARRIER};

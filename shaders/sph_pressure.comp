@@ -61,21 +61,14 @@ void main() {
   ivec3 center = cellCoord(pi);
 
   vec3 force = vec3(0.0);
-  uint seen[27];
-  int seenCount = 0;
   for (int dz = -1; dz <= 1; dz++)
   for (int dy = -1; dy <= 1; dy++)
   for (int dx = -1; dx <= 1; dx++) {
     uint key = cellKey(center + ivec3(dx, dy, dz));
-    bool dup = false;
-    for (int s = 0; s < seenCount; s++) if (seen[s] == key) { dup = true; break; }
-    if (dup) continue;
-    seen[seenCount++] = key;
-
     uint start = startIndices[key];
     if (start == 0xffffffffu) continue;
     for (uint e = start; e < P.numParticles && spatialKeys[e] == key; e++) {
-      uint j = spatialIndices[e];
+      uint j = e; // data is now in sorted order
       if (j == idx) continue;
       vec3 offset = predicted[j].xyz - pi;
       float dst = length(offset);
