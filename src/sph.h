@@ -15,7 +15,7 @@ constexpr float PI = 3.14159265358979f;
 // integration
 constexpr float deltaT = 0.002f;
 constexpr float3 gravity = float3(0.0f, -9.8f, 0.0f);
-constexpr int numParticles = 100000;
+constexpr int numParticles = 50000;
 
 // SPH parameters
 constexpr float smoothingRadius = 0.2f;      // kernel support radius

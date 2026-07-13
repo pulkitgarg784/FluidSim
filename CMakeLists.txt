@@ -27,7 +27,17 @@ file(MAKE_DIRECTORY ${SHADER_OUT_DIR})
 
 set(SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.frag)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_external.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_hash_keys.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_reorder.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_copyback.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_start_reset.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_start_indices.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_density.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_pressure.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_viscosity.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_integrate.comp)
 
 set(SPIRV_OUTPUTS)
 foreach(SHADER ${SHADER_SOURCES})
@@ -43,11 +53,12 @@ endforeach()
 
 add_custom_target(shaders DEPENDS ${SPIRV_OUTPUTS})
 
-add_executable(CS488 src/main.cpp)
+add_executable(CS488 src/main.cpp src/vk_radix_sort_impl.cpp)
 add_dependencies(CS488 shaders)
 
 target_include_directories(CS488 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/vulkan_radix_sort/include
     ${Vulkan_INCLUDE_DIRS})
 
 target_compile_definitions(CS488 PRIVATE
