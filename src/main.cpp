@@ -12,7 +12,9 @@ using namespace linalg::aliases;
 constexpr float PI = 3.14159265358979f;
 constexpr float DegToRad = PI / 180.0f;
 constexpr float ANGFACT = 0.2f;    // mouse look sensitivity
-constexpr float moveSpeed = 1.5f;  // keyboard movement 
+constexpr float moveSpeed = 1.5f;  // keyboard movement
+constexpr float interactionRadius = 1.5f;
+constexpr float interactionStrength = 40.0f;
 
 static float3 globalEye = float3(0.0f, 0.0f, 14.0f);
 static float3 globalLookat = float3(0.0f, 0.0f, 0.0f);
@@ -21,6 +23,7 @@ static float3 globalViewDir = normalize(globalLookat - globalEye);
 static float3 globalRight = normalize(cross(globalViewDir, globalUp));
 
 static bool mouseLeftPressed = false;
+static bool mouseRightPressed = false;
 static double m_mouseX = 0.0;
 static double m_mouseY = 0.0;
 
@@ -52,12 +55,18 @@ static void processKeyboard(GLFWwindow *w, float dt) {
   }
 }
 
-static void mouseButtonFunc(GLFWwindow *, int button, int action, int) {
+static void mouseButtonFunc(GLFWwindow *window, int button, int action, int) {
+  const bool shiftHeld = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                        glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
   if (button == GLFW_MOUSE_BUTTON_LEFT) {
-    if (action == GLFW_PRESS)
-      mouseLeftPressed = true;
-    else if (action == GLFW_RELEASE)
+    if (action == GLFW_PRESS) {
+      if (!shiftHeld)
+        mouseLeftPressed = true;
+    } else if (action == GLFW_RELEASE) {
       mouseLeftPressed = false;
+    }
+  } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+    mouseRightPressed = (action == GLFW_PRESS);
   }
 }
 
@@ -110,6 +119,16 @@ static float4x4 lookAt(const float3 &eye, const float3 &center,
   m[2] = float4(s.z, u.z, -f.z, 0.0f);
   m[3] = float4(-dot(s, eye), -dot(u, eye), dot(f, eye), 1.0f);
   return m;
+}
+
+static float3 mouseRayDirection(double mouseX, double mouseY, int width,
+                                int height, float fovyDeg, float aspect) {
+  float ndcX = (2.0f * float(mouseX) / float(width)) - 1.0f;
+  float ndcY = 1.0f - (2.0f * float(mouseY) / float(height));
+  float tanHalfFov = std::tan(fovyDeg * DegToRad * 0.5f);
+  float3 dir = globalViewDir + globalRight * (ndcX * tanHalfFov * aspect) +
+              cross(globalRight, globalViewDir) * (ndcY * tanHalfFov);
+  return normalize(dir);
 }
 
 int main() {
@@ -194,6 +213,30 @@ int main() {
       const float4x4 proj = perspectiveVK(45.0f, aspect, 0.01f, 100.0f);
       const float4x4 view = lookAt(globalEye, globalLookat, globalUp);
       const float4x4 viewProj = mul(proj, view);
+
+      // Shift+Left click attracts the fluid, Shift+Right click repels it.
+      const bool shiftHeld =
+          glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+          glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+      float interactionStrengthSigned = 0.0f;
+      float3 interactionPoint = float3(0.0f);
+      if (shiftHeld && (mouseLeftPressed || mouseRightPressed)) {
+        float3 rayDir = mouseRayDirection(m_mouseX, m_mouseY, width, height,
+                                          45.0f, aspect);
+        float3 planeNormal = -globalViewDir; // faces the camera
+        float3 planePoint = float3(0.0f);    // box centre
+        float denom = dot(rayDir, planeNormal);
+        if (std::abs(denom) > 1e-6f) {
+          float t = dot(planePoint - globalEye, planeNormal) / denom;
+          if (t > 0.0f) {
+            interactionPoint = globalEye + rayDir * t;
+            interactionStrengthSigned =
+                mouseLeftPressed ? interactionStrength : -interactionStrength;
+          }
+        }
+      }
+      renderer.setInteraction(interactionPoint, interactionRadius,
+                              interactionStrengthSigned);
 
       // the simulation now runs entirely on the GPU inside drawFrame
       renderer.drawFrame(viewProj, globalRight, camUp, renderRadius,

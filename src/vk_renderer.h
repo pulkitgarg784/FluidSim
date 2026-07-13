@@ -73,6 +73,13 @@ struct PushConstants {
   float4 params; // (x = particle radius)
 };
 
+struct InteractionParams {
+  float point[4];
+  float radius;
+  float strength;// > 0 attract, < 0 repel
+  float _pad0, _pad1;
+};
+
 inline void vkCheck(VkResult r, const char *what) {
   if (r != VK_SUCCESS) {
     throw std::runtime_error(std::string("Vulkan error in ") + what + ": " +
@@ -118,6 +125,16 @@ public:
   void setParams(SphParams params) {
     params.paddedCount = paddedCount_;
     std::memcpy(paramsMapped_, &params, sizeof(SphParams));
+  }
+
+  void setInteraction(const float3 &worldPoint, float radius, float strength) {
+    InteractionParams ip{};
+    ip.point[0] = worldPoint.x;
+    ip.point[1] = worldPoint.y;
+    ip.point[2] = worldPoint.z;
+    ip.radius = radius;
+    ip.strength = strength;
+    std::memcpy(interactionMapped_, &ip, sizeof(InteractionParams));
   }
 
   void uploadInitialState(const std::vector<float4> &positions,
@@ -228,6 +245,7 @@ public:
       sorter_ = VK_NULL_HANDLE;
     }
     destroyBuffer(paramsBuf_, paramsMem_);
+    destroyBuffer(interactionBuf_, interactionMem_);
 
     if (quadBuffer_) {
       vkDestroyBuffer(device_, quadBuffer_, nullptr);
@@ -340,6 +358,7 @@ private:
   VkBuffer densitiesBuf_ = VK_NULL_HANDLE;   VkDeviceMemory densitiesMem_ = VK_NULL_HANDLE;
   VkBuffer viscForceBuf_ = VK_NULL_HANDLE;   VkDeviceMemory viscForceMem_ = VK_NULL_HANDLE;
   VkBuffer paramsBuf_ = VK_NULL_HANDLE;      VkDeviceMemory paramsMem_ = VK_NULL_HANDLE;      void *paramsMapped_ = nullptr;
+  VkBuffer interactionBuf_ = VK_NULL_HANDLE; VkDeviceMemory interactionMem_ = VK_NULL_HANDLE; void *interactionMapped_ = nullptr;
   // spatial-hash buffers
   VkBuffer keysBuf_ = VK_NULL_HANDLE;        VkDeviceMemory keysMem_ = VK_NULL_HANDLE;
   VkBuffer indicesBuf_ = VK_NULL_HANDLE;     VkDeviceMemory indicesMem_ = VK_NULL_HANDLE;
@@ -934,6 +953,13 @@ private:
                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  paramsBuf_, paramsMem_);
     vkMapMemory(device_, paramsMem_, 0, sizeof(SphParams), 0, &paramsMapped_);
+
+    createBuffer(sizeof(InteractionParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 interactionBuf_, interactionMem_);
+    vkMapMemory(device_, interactionMem_, 0, sizeof(InteractionParams), 0,
+               &interactionMapped_);
   }
 
   void createSorter() {
@@ -951,9 +977,10 @@ private:
   }
 
   void createDescriptorSetLayout() {
-    // bindings 0-4 sim, 5 UBO, 6-8 spatial hash, 9-11 sorted scratch
-    std::array<VkDescriptorSetLayoutBinding, 12> b{};
-    for (uint32_t i = 0; i < 12; i++) {
+    // bindings 0-4 sim, 5 UBO(params), 6-8 spatial hash, 9-11 sorted scratch,
+    // 12 UBO(interaction)
+    std::array<VkDescriptorSetLayoutBinding, 13> b{};
+    for (uint32_t i = 0; i < 13; i++) {
       b[i].binding = i;
       b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       b[i].descriptorCount = 1;
@@ -965,6 +992,9 @@ private:
     // binding 5 is the uniform params block
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     b[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    // binding 12 is the uniform interaction block
+    b[12].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    b[12].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo ci{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -978,7 +1008,7 @@ private:
   void createDescriptorPoolAndSet() {
     std::array<VkDescriptorPoolSize, 2> sizes{};
     sizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11};
-    sizes[1] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
+    sizes[1] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2};
     VkDescriptorPoolCreateInfo pi{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.maxSets = 1;
@@ -995,20 +1025,21 @@ private:
     vkCheck(vkAllocateDescriptorSets(device_, &ai, &descriptorSet_),
             "vkAllocateDescriptorSets");
 
-    // binding index -> buffer (index 5 is the UBO, handled specially)
-    VkBuffer bufs[12] = {positionsBuf_, velocitiesBuf_, predictedBuf_,
+    // binding index -> buffer (indices 5 and 12 are UBOs, handled specially)
+    VkBuffer bufs[13] = {positionsBuf_, velocitiesBuf_, predictedBuf_,
                          densitiesBuf_, viscForceBuf_,  paramsBuf_,
                          keysBuf_,      indicesBuf_,     startBuf_,
-                         sortedPosBuf_, sortedVelBuf_,   sortedPredBuf_};
-    std::array<VkDescriptorBufferInfo, 12> infos{};
-    std::array<VkWriteDescriptorSet, 12> writes{};
-    for (uint32_t i = 0; i < 12; i++) {
+                         sortedPosBuf_, sortedVelBuf_,   sortedPredBuf_,
+                         interactionBuf_};
+    std::array<VkDescriptorBufferInfo, 13> infos{};
+    std::array<VkWriteDescriptorSet, 13> writes{};
+    for (uint32_t i = 0; i < 13; i++) {
       infos[i] = {bufs[i], 0, VK_WHOLE_SIZE};
       writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       writes[i].dstSet = descriptorSet_;
       writes[i].dstBinding = i;
       writes[i].descriptorCount = 1;
-      writes[i].descriptorType = (i == 5)
+      writes[i].descriptorType = (i == 5 || i == 12)
                                      ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
                                      : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       writes[i].pBufferInfo = &infos[i];
