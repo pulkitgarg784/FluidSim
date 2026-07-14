@@ -196,7 +196,7 @@ public:
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cmd;
     VkSemaphore signalSemaphores[] = {
-        renderFinishedSemaphores_[currentFrame_]};
+        renderFinishedSemaphores_[imageIndex]};
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = signalSemaphores;
     vkCheck(vkQueueSubmit(graphicsQueue_, 1, &submit,
@@ -278,9 +278,10 @@ public:
       vkFreeMemory(device_, quadMemory_, nullptr);
     }
 
+    for (auto sem : renderFinishedSemaphores_)
+      if (sem) vkDestroySemaphore(device_, sem, nullptr);
+    renderFinishedSemaphores_.clear();
     for (int i = 0; i < kMaxFramesInFlight; i++) {
-      if (renderFinishedSemaphores_[i])
-        vkDestroySemaphore(device_, renderFinishedSemaphores_[i], nullptr);
       if (imageAvailableSemaphores_[i])
         vkDestroySemaphore(device_, imageAvailableSemaphores_[i], nullptr);
       if (inFlightFences_[i])
@@ -436,7 +437,7 @@ private:
   VkCommandPool commandPool_ = VK_NULL_HANDLE;
   std::array<VkCommandBuffer, kMaxFramesInFlight> commandBuffers_{};
   std::array<VkSemaphore, kMaxFramesInFlight> imageAvailableSemaphores_{};
-  std::array<VkSemaphore, kMaxFramesInFlight> renderFinishedSemaphores_{};
+  std::vector<VkSemaphore> renderFinishedSemaphores_; // one per swapchain image
   std::array<VkFence, kMaxFramesInFlight> inFlightFences_{};
   uint32_t currentFrame_ = 0;
 
@@ -1541,12 +1542,16 @@ private:
       vkCheck(vkCreateSemaphore(device_, &si, nullptr,
                                 &imageAvailableSemaphores_[i]),
               "vkCreateSemaphore");
-      vkCheck(vkCreateSemaphore(device_, &si, nullptr,
-                                &renderFinishedSemaphores_[i]),
-              "vkCreateSemaphore");
       vkCheck(vkCreateFence(device_, &fi, nullptr, &inFlightFences_[i]),
               "vkCreateFence");
     }
+    // one render-finished semaphore per swapchain image, so a present that is
+    // still consuming semaphore K can never be re-signaled by a later frame
+    // that happens to reuse image K while K's present is still pending.
+    renderFinishedSemaphores_.resize(swapchainImages_.size());
+    for (auto &sem : renderFinishedSemaphores_)
+      vkCheck(vkCreateSemaphore(device_, &si, nullptr, &sem),
+              "vkCreateSemaphore(renderFinished)");
   }
 
   // Barrier so one compute pass's SSBO writes are visible to the next.
@@ -1557,6 +1562,25 @@ private:
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b, 0,
                          nullptr, 0, nullptr);
+  }
+
+  // Explicit barrier between two render passes: waits for a color attachment
+  // write to finish before the next pass's fragment shader samples it. Needed
+  // because two independent render passes are NOT synchronized against each
+  // other just by each having their own VK_SUBPASS_EXTERNAL dependency.
+  void colorToSampledBarrier(VkCommandBuffer cmd, VkImage image) {
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = image;
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
+                         0, nullptr, 1, &b);
   }
 
   void dispatchStage(VkCommandBuffer cmd, VkPipeline pipeline, uint32_t groups) {
@@ -1642,6 +1666,7 @@ private:
     if (numParticles_ > 0)
       vkCmdDraw(cmd, 6, numParticles_, 0, 0);
     vkCmdEndRenderPass(cmd);
+    colorToSampledBarrier(cmd, fluidDepthImage_);
 
     // Bilateral blur using two passes
     auto blurPass = [&](VkFramebuffer fb, VkDescriptorSet src, float dx,
@@ -1656,7 +1681,7 @@ private:
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline_);
       vkCmdSetViewport(cmd, 0, 1, &viewport);
       vkCmdSetScissor(cmd, 0, 1, &scissor);
-      float bpc[4] = {dx, dy, 0.5f, 12.0f}; // dir, depthFalloff, radius(px)
+      float bpc[4] = {dx, dy, 0.2f, 19.0f}; // dir, depthFalloff, radius(px)
       vkCmdPushConstants(cmd, blurPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
                          0, sizeof(bpc), bpc);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1667,7 +1692,9 @@ private:
     float invW = 1.0f / (float)swapchainExtent_.width;
     float invH = 1.0f / (float)swapchainExtent_.height;
     blurPass(blurTempFB_, blurSetH_, invW, 0.0f);   // horizontal
+    colorToSampledBarrier(cmd, blurTempImage_);
     blurPass(blurSmoothFB_, blurSetV_, 0.0f, invH); // vertical
+    colorToSampledBarrier(cmd, blurSmoothImage_);
 
     // composite into swapchain image
     std::array<VkClearValue, 2> clears{};
@@ -1684,7 +1711,12 @@ private:
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compositePipeline_);
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
-    float compPC[4] = {8.0f, 20.0f, 0.0f, 0.0f}; // debug depth ramp: near, far
+    // reconstruct camera params from the projection matrix for normal recovery
+    float fproj = -dp.proj[1].y;            // proj[1][1] = -1/tan(fovy/2)
+    float tanHalf = 1.0f / fproj;
+    float aspect = fproj / dp.proj[0].x;    // proj[0][0] = f/aspect
+    float compPC[4] = {1.0f / (float)swapchainExtent_.width,
+                       1.0f / (float)swapchainExtent_.height, tanHalf, aspect};
     vkCmdPushConstants(cmd, compositePipelineLayout_,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(compPC), compPC);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1742,6 +1774,9 @@ private:
       glfwWaitEvents();
     }
     vkDeviceWaitIdle(device_);
+    for (auto sem : renderFinishedSemaphores_)
+      if (sem) vkDestroySemaphore(device_, sem, nullptr);
+    renderFinishedSemaphores_.clear();
     cleanupSwapchain();
     createSwapchain();
     createImageViews();
@@ -1749,6 +1784,12 @@ private:
     createFramebuffers();
     createFluidTargets();
     updateFluidDescriptors();
+    // swapchain image count may have changed; rebuild the per-image semaphores
+    VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    renderFinishedSemaphores_.resize(swapchainImages_.size());
+    for (auto &sem : renderFinishedSemaphores_)
+      vkCheck(vkCreateSemaphore(device_, &si, nullptr, &sem),
+              "vkCreateSemaphore(renderFinished)");
   }
 };
 

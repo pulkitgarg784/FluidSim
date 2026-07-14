@@ -16,7 +16,7 @@ constexpr float moveSpeed = 1.5f;  // keyboard movement
 constexpr float interactionRadius = 1.5f;
 constexpr float interactionStrength = 40.0f;
 
-static float3 globalEye = float3(0.0f, 0.0f, 14.0f);
+static float3 globalEye = float3(0.0f, 5.0f, 14.0f);
 static float3 globalLookat = float3(0.0f, 0.0f, 0.0f);
 static float3 globalUp = normalize(float3(0.0f, 1.0f, 0.0f));
 static float3 globalViewDir = normalize(globalLookat - globalEye);
@@ -182,7 +182,7 @@ int main() {
   }
   renderer.uploadInitialState(initPos, initVel);
 
-  const float renderRadius = 0.08f;
+  const float renderRadius = 0.068f;
 
   double lastTime = glfwGetTime();
 

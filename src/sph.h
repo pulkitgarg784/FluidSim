@@ -15,15 +15,15 @@ constexpr float PI = 3.14159265358979f;
 // integration
 constexpr float deltaT = 0.002f;
 constexpr float3 gravity = float3(0.0f, -9.8f, 0.0f);
-constexpr int numParticles = 50000;
+constexpr int numParticles = 75000;
 
 // SPH parameters
-constexpr float smoothingRadius = 0.2f;      // kernel support radius
+constexpr float smoothingRadius = 0.12f;     // kernel support radius
 constexpr float particleMass = 1.0f;         // mass used for density accumulation
 constexpr float collisionDamping = 0.95f;    // velocity kept on a wall bounce
 constexpr float3 boundsSize = float3(8.77f, 2.92f, 2.92f); // simulation box extents
-constexpr float targetDensity = 1193.0f;     // rest density the fluid relaxes to
-constexpr float pressureMultiplier = 45.0f;  // stiffness (pressure per density error)
+constexpr float targetDensity = 2315.0f;     // rest density the fluid relaxes to (75k particles, spacing ~0.076)
+constexpr float pressureMultiplier = 16.0f;  // stiffness (acceleration-matched to the finer kernel)
 constexpr float viscosityStrength = 0.001f;  // neighbour velocity averaging
 constexpr int simIterationsPerFrame = 6;     // physics substeps per rendered frame
 

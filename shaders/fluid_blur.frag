@@ -25,7 +25,7 @@ void main() {
     for (int i = -R; i <= R; i++) {
         vec2 uv = vUV + pc.dir * float(i);
         float d = texture(src, uv).r;
-        if (d >= 0e4 * 0.5)
+        if (d >= 1.0e4 * 0.5)
             continue; // no water
         float wSpatial = exp(-float(i * i) / sigma2);
         float dd = d - centerD;
