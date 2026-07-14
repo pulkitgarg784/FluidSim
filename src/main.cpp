@@ -182,7 +182,7 @@ int main() {
   }
   renderer.uploadInitialState(initPos, initVel);
 
-  const float renderRadius = 0.02f;
+  const float renderRadius = 0.08f;
 
   double lastTime = glfwGetTime();
 
@@ -239,7 +239,7 @@ int main() {
                               interactionStrengthSigned);
 
       // the simulation now runs entirely on the GPU inside drawFrame
-      renderer.drawFrame(viewProj, globalRight, camUp, renderRadius,
+      renderer.drawFrame(view, proj, globalRight, camUp, renderRadius,
                          sph::simIterationsPerFrame);
 
       // Update FPS counter

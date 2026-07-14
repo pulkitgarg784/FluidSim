@@ -80,6 +80,14 @@ struct InteractionParams {
   float _pad0, _pad1;
 };
 
+struct DepthPush {
+  float4x4 view;
+  float4x4 proj;
+  float4 camRight;
+  float4 camUp;
+  float4 params; // x = particle radius
+};
+
 inline void vkCheck(VkResult r, const char *what) {
   if (r != VK_SUCCESS) {
     throw std::runtime_error(std::string("Vulkan error in ") + what + ": " +
@@ -112,6 +120,8 @@ public:
     createGraphicsPipeline();
     createComputePipelines();
     createQuadVertexBuffer();
+    createFluidTargets();
+    createFluidPipelines();
     createCommandPoolAndBuffers();
     createSyncObjects();
   }
@@ -146,8 +156,9 @@ public:
   }
 
   // Advance the simulation `substeps` times on the GPU, then draw one frame.
-  void drawFrame(const float4x4 &viewProj, const float3 &camRight,
-                 const float3 &camUp, float radius, int substeps) {
+  void drawFrame(const float4x4 &view, const float4x4 &proj,
+                 const float3 &camRight, const float3 &camUp, float radius,
+                 int substeps) {
     vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE,
                     UINT64_MAX);
 
@@ -164,15 +175,16 @@ public:
 
     vkResetFences(device_, 1, &inFlightFences_[currentFrame_]);
 
-    PushConstants pc{};
-    pc.viewProj = viewProj;
-    pc.camRight = float4(camRight, 0.0f);
-    pc.camUp = float4(camUp, 0.0f);
-    pc.params = float4(radius, 0.0f, 0.0f, 0.0f);
+    DepthPush dp{};
+    dp.view = view;
+    dp.proj = proj;
+    dp.camRight = float4(camRight, 0.0f);
+    dp.camUp = float4(camUp, 0.0f);
+    dp.params = float4(radius, 0.0f, 0.0f, 0.0f);
 
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
     vkResetCommandBuffer(cmd, 0);
-    recordCommandBuffer(cmd, imageIndex, pc, substeps);
+    recordCommandBuffer(cmd, imageIndex, dp, substeps);
 
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     VkSemaphore waitSemaphores[] = {imageAvailableSemaphores_[currentFrame_]};
@@ -221,6 +233,20 @@ public:
       vkDestroyPipelineLayout(device_, computePipelineLayout_, nullptr);
     if (pipeline_) vkDestroyPipeline(device_, pipeline_, nullptr);
     if (pipelineLayout_) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
+
+    // fluid rendering
+    if (compositePipeline_) vkDestroyPipeline(device_, compositePipeline_, nullptr);
+    if (compositePipelineLayout_) vkDestroyPipelineLayout(device_, compositePipelineLayout_, nullptr);
+    if (blurPipeline_) vkDestroyPipeline(device_, blurPipeline_, nullptr);
+    if (blurPipelineLayout_) vkDestroyPipelineLayout(device_, blurPipelineLayout_, nullptr);
+    if (blurPass_) vkDestroyRenderPass(device_, blurPass_, nullptr);
+    if (compositePool_) vkDestroyDescriptorPool(device_, compositePool_, nullptr);
+    if (compositeSetLayout_) vkDestroyDescriptorSetLayout(device_, compositeSetLayout_, nullptr);
+    if (depthPipeline_) vkDestroyPipeline(device_, depthPipeline_, nullptr);
+    if (depthPipelineLayout_) vkDestroyPipelineLayout(device_, depthPipelineLayout_, nullptr);
+    if (fluidSampler_) vkDestroySampler(device_, fluidSampler_, nullptr);
+    if (fluidDepthPass_) vkDestroyRenderPass(device_, fluidDepthPass_, nullptr);
+
     if (renderPass_) vkDestroyRenderPass(device_, renderPass_, nullptr);
 
     if (descriptorPool_)
@@ -345,6 +371,31 @@ private:
   VkRenderPass renderPass_ = VK_NULL_HANDLE;
   VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
   VkPipeline pipeline_ = VK_NULL_HANDLE;
+
+  VkFormat fluidDepthFormat_ = VK_FORMAT_R32_SFLOAT;
+  VkImage fluidDepthImage_ = VK_NULL_HANDLE;   VkDeviceMemory fluidDepthMem_ = VK_NULL_HANDLE;  VkImageView fluidDepthView_ = VK_NULL_HANDLE;
+  VkImage fluidZImage_ = VK_NULL_HANDLE;       VkDeviceMemory fluidZMem_ = VK_NULL_HANDLE;      VkImageView fluidZView_ = VK_NULL_HANDLE; // offscreen depth buffer
+  VkRenderPass fluidDepthPass_ = VK_NULL_HANDLE;
+  VkFramebuffer fluidDepthFB_ = VK_NULL_HANDLE;
+  VkSampler fluidSampler_ = VK_NULL_HANDLE;
+  VkPipelineLayout depthPipelineLayout_ = VK_NULL_HANDLE;
+  VkPipeline depthPipeline_ = VK_NULL_HANDLE;
+  VkDescriptorSetLayout compositeSetLayout_ = VK_NULL_HANDLE;
+  VkDescriptorPool compositePool_ = VK_NULL_HANDLE;
+  VkDescriptorSet compositeSet_ = VK_NULL_HANDLE;
+  VkPipelineLayout compositePipelineLayout_ = VK_NULL_HANDLE;
+  VkPipeline compositePipeline_ = VK_NULL_HANDLE;
+
+  // bilateral blur
+  VkImage blurTempImage_ = VK_NULL_HANDLE;   VkDeviceMemory blurTempMem_ = VK_NULL_HANDLE;   VkImageView blurTempView_ = VK_NULL_HANDLE;
+  VkImage blurSmoothImage_ = VK_NULL_HANDLE; VkDeviceMemory blurSmoothMem_ = VK_NULL_HANDLE; VkImageView blurSmoothView_ = VK_NULL_HANDLE;
+  VkRenderPass blurPass_ = VK_NULL_HANDLE;
+  VkFramebuffer blurTempFB_ = VK_NULL_HANDLE;
+  VkFramebuffer blurSmoothFB_ = VK_NULL_HANDLE;
+  VkPipelineLayout blurPipelineLayout_ = VK_NULL_HANDLE;
+  VkPipeline blurPipeline_ = VK_NULL_HANDLE;
+  VkDescriptorSet blurSetH_ = VK_NULL_HANDLE;
+  VkDescriptorSet blurSetV_ = VK_NULL_HANDLE;
 
   VkBuffer quadBuffer_ = VK_NULL_HANDLE;
   VkDeviceMemory quadMemory_ = VK_NULL_HANDLE;
@@ -1089,6 +1140,383 @@ private:
     computePipelines_[9] = createComputePipeline("sph_integrate.comp.spv");
   }
 
+  void createImage2D(VkFormat format, VkImageUsageFlags usage,
+                     VkImageAspectFlags aspect, VkImage &image,
+                     VkDeviceMemory &mem, VkImageView &view) {
+    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.imageType = VK_IMAGE_TYPE_2D;
+    ci.extent = {swapchainExtent_.width, swapchainExtent_.height, 1};
+    ci.mipLevels = 1;
+    ci.arrayLayers = 1;
+    ci.format = format;
+    ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ci.usage = usage;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCheck(vkCreateImage(device_, &ci, nullptr, &image), "vkCreateImage");
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(device_, image, &req);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex =
+        findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkCheck(vkAllocateMemory(device_, &ai, nullptr, &mem), "vkAllocateMemory");
+    vkBindImageMemory(device_, image, mem, 0);
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = image;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = format;
+    vi.subresourceRange.aspectMask = aspect;
+    vi.subresourceRange.levelCount = 1;
+    vi.subresourceRange.layerCount = 1;
+    vkCheck(vkCreateImageView(device_, &vi, nullptr, &view), "vkCreateImageView");
+  }
+
+  void createFluidTargets() {
+    createImage2D(fluidDepthFormat_,
+                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_SAMPLED_BIT,
+                  VK_IMAGE_ASPECT_COLOR_BIT, fluidDepthImage_, fluidDepthMem_,
+                  fluidDepthView_);
+    createImage2D(depthFormat_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                  VK_IMAGE_ASPECT_DEPTH_BIT, fluidZImage_, fluidZMem_,
+                  fluidZView_);
+
+    VkAttachmentDescription color{};
+    color.format = fluidDepthFormat_;
+    color.samples = VK_SAMPLE_COUNT_1_BIT;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    color.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAttachmentDescription depth{};
+    depth.format = depthFormat_;
+    depth.samples = VK_SAMPLE_COUNT_1_BIT;
+    depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depthRef{
+        1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+    subpass.pDepthStencilAttachment = &depthRef;
+    // make the depth-write result visible to the composite pass's sampling
+    VkSubpassDependency dep{};
+    dep.srcSubpass = 0;
+    dep.dstSubpass = VK_SUBPASS_EXTERNAL;
+    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dep.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dep.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    std::array<VkAttachmentDescription, 2> atts = {color, depth};
+    VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rp.attachmentCount = 2;
+    rp.pAttachments = atts.data();
+    rp.subpassCount = 1;
+    rp.pSubpasses = &subpass;
+    rp.dependencyCount = 1;
+    rp.pDependencies = &dep;
+    if (!fluidDepthPass_) // format-invariant; create once, reuse across resizes
+      vkCheck(vkCreateRenderPass(device_, &rp, nullptr, &fluidDepthPass_),
+              "vkCreateRenderPass(fluid)");
+
+    std::array<VkImageView, 2> fbatt = {fluidDepthView_, fluidZView_};
+    VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fb.renderPass = fluidDepthPass_;
+    fb.attachmentCount = 2;
+    fb.pAttachments = fbatt.data();
+    fb.width = swapchainExtent_.width;
+    fb.height = swapchainExtent_.height;
+    fb.layers = 1;
+    vkCheck(vkCreateFramebuffer(device_, &fb, nullptr, &fluidDepthFB_),
+            "vkCreateFramebuffer(fluid)");
+
+    if (!fluidSampler_) {
+      VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+      si.magFilter = VK_FILTER_NEAREST;
+      si.minFilter = VK_FILTER_NEAREST;
+      si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+      si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+      si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+      vkCheck(vkCreateSampler(device_, &si, nullptr, &fluidSampler_),
+              "vkCreateSampler");
+    }
+
+    // blur target
+    createImage2D(fluidDepthFormat_,
+                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_SAMPLED_BIT,
+                  VK_IMAGE_ASPECT_COLOR_BIT, blurTempImage_, blurTempMem_,
+                  blurTempView_);
+    createImage2D(fluidDepthFormat_,
+                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_SAMPLED_BIT,
+                  VK_IMAGE_ASPECT_COLOR_BIT, blurSmoothImage_, blurSmoothMem_,
+                  blurSmoothView_);
+
+    if (!blurPass_) { // color-only pass, reused across resizes
+      VkAttachmentDescription bc{};
+      bc.format = fluidDepthFormat_;
+      bc.samples = VK_SAMPLE_COUNT_1_BIT;
+      bc.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; // fully overwritten
+      bc.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+      bc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      bc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      bc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      bc.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      VkAttachmentReference bref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+      VkSubpassDescription bsub{};
+      bsub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+      bsub.colorAttachmentCount = 1;
+      bsub.pColorAttachments = &bref;
+      VkSubpassDependency bdep{};
+      bdep.srcSubpass = 0;
+      bdep.dstSubpass = VK_SUBPASS_EXTERNAL;
+      bdep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      bdep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+      bdep.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+      bdep.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+      VkRenderPassCreateInfo brp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+      brp.attachmentCount = 1;
+      brp.pAttachments = &bc;
+      brp.subpassCount = 1;
+      brp.pSubpasses = &bsub;
+      brp.dependencyCount = 1;
+      brp.pDependencies = &bdep;
+      vkCheck(vkCreateRenderPass(device_, &brp, nullptr, &blurPass_),
+              "vkCreateRenderPass(blur)");
+    }
+
+    VkFramebufferCreateInfo bfb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    bfb.renderPass = blurPass_;
+    bfb.attachmentCount = 1;
+    bfb.width = swapchainExtent_.width;
+    bfb.height = swapchainExtent_.height;
+    bfb.layers = 1;
+    bfb.pAttachments = &blurTempView_;
+    vkCheck(vkCreateFramebuffer(device_, &bfb, nullptr, &blurTempFB_),
+            "vkCreateFramebuffer(blurTemp)");
+    bfb.pAttachments = &blurSmoothView_;
+    vkCheck(vkCreateFramebuffer(device_, &bfb, nullptr, &blurSmoothFB_),
+            "vkCreateFramebuffer(blurSmooth)");
+  }
+
+  void createFluidPipelines() {
+    // depth target
+    VkPushConstantRange depthPC{};
+    depthPC.stageFlags =
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    depthPC.offset = 0;
+    depthPC.size = sizeof(DepthPush);
+    VkPipelineLayoutCreateInfo dpl{
+        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    dpl.setLayoutCount = 1;
+    dpl.pSetLayouts = &descriptorSetLayout_;
+    dpl.pushConstantRangeCount = 1;
+    dpl.pPushConstantRanges = &depthPC;
+    vkCheck(vkCreatePipelineLayout(device_, &dpl, nullptr, &depthPipelineLayout_),
+            "vkCreatePipelineLayout(depth)");
+
+    VkVertexInputBindingDescription bind{0, sizeof(float) * 2,
+                                         VK_VERTEX_INPUT_RATE_VERTEX};
+    VkVertexInputAttributeDescription attr{0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
+    depthPipeline_ = buildGraphicsPipeline(
+        "fluid_depth.vert.spv", "fluid_depth.frag.spv", fluidDepthPass_,
+        depthPipelineLayout_, &bind, &attr, /*attrCount*/ 1, /*depthTest*/ true);
+
+    VkDescriptorSetLayoutBinding sb{};
+    sb.binding = 0;
+    sb.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sb.descriptorCount = 1;
+    sb.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo sl{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    sl.bindingCount = 1;
+    sl.pBindings = &sb;
+    vkCheck(vkCreateDescriptorSetLayout(device_, &sl, nullptr,
+                                        &compositeSetLayout_),
+            "vkCreateDescriptorSetLayout(composite)");
+
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3};
+    VkDescriptorPoolCreateInfo pp{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pp.maxSets = 3; // composite + blurH + blurV
+    pp.poolSizeCount = 1;
+    pp.pPoolSizes = &ps;
+    vkCheck(vkCreateDescriptorPool(device_, &pp, nullptr, &compositePool_),
+            "vkCreateDescriptorPool(composite)");
+    VkDescriptorSetAllocateInfo sa{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    sa.descriptorPool = compositePool_;
+    sa.descriptorSetCount = 1;
+    sa.pSetLayouts = &compositeSetLayout_;
+    vkCheck(vkAllocateDescriptorSets(device_, &sa, &compositeSet_),
+            "vkAllocateDescriptorSets(composite)");
+    vkCheck(vkAllocateDescriptorSets(device_, &sa, &blurSetH_),
+            "vkAllocateDescriptorSets(blurH)");
+    vkCheck(vkAllocateDescriptorSets(device_, &sa, &blurSetV_),
+            "vkAllocateDescriptorSets(blurV)");
+    updateFluidDescriptors();
+
+    VkPushConstantRange blurPC{};
+    blurPC.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    blurPC.offset = 0;
+    blurPC.size = sizeof(float) * 4; // dir.xy, depthFalloff, radius
+    VkPipelineLayoutCreateInfo bpl{
+        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    bpl.setLayoutCount = 1;
+    bpl.pSetLayouts = &compositeSetLayout_;
+    bpl.pushConstantRangeCount = 1;
+    bpl.pPushConstantRanges = &blurPC;
+    vkCheck(vkCreatePipelineLayout(device_, &bpl, nullptr, &blurPipelineLayout_),
+            "vkCreatePipelineLayout(blur)");
+    blurPipeline_ = buildGraphicsPipeline(
+        "fullscreen.vert.spv", "fluid_blur.frag.spv", blurPass_,
+        blurPipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false);
+
+    VkPushConstantRange compPC{};
+    compPC.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    compPC.offset = 0;
+    compPC.size = sizeof(float) * 4;
+    VkPipelineLayoutCreateInfo cpl{
+        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    cpl.setLayoutCount = 1;
+    cpl.pSetLayouts = &compositeSetLayout_;
+    cpl.pushConstantRangeCount = 1;
+    cpl.pPushConstantRanges = &compPC;
+    vkCheck(vkCreatePipelineLayout(device_, &cpl, nullptr,
+                                   &compositePipelineLayout_),
+            "vkCreatePipelineLayout(composite)");
+
+    compositePipeline_ = buildGraphicsPipeline(
+        "fullscreen.vert.spv", "fluid_composite.frag.spv", renderPass_,
+        compositePipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false);
+  }
+
+  void updateFluidDescriptors() {
+    auto writeSampler = [&](VkDescriptorSet set, VkImageView view) {
+      VkDescriptorImageInfo img{};
+      img.sampler = fluidSampler_;
+      img.imageView = view;
+      img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      w.dstSet = set;
+      w.dstBinding = 0;
+      w.descriptorCount = 1;
+      w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+      w.pImageInfo = &img;
+      vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+    };
+    writeSampler(blurSetH_, fluidDepthView_);
+    writeSampler(blurSetV_, blurTempView_);
+    writeSampler(compositeSet_, blurSmoothView_);
+  }
+
+  VkPipeline buildGraphicsPipeline(const char *vertSpv, const char *fragSpv,
+                                   VkRenderPass pass, VkPipelineLayout layout,
+                                   const VkVertexInputBindingDescription *bind,
+                                   const VkVertexInputAttributeDescription *attr,
+                                   uint32_t attrCount, bool depthTest) {
+    VkShaderModule vert =
+        createShaderModule(readFile(std::string(SHADER_DIR) + "/" + vertSpv));
+    VkShaderModule frag =
+        createShaderModule(readFile(std::string(SHADER_DIR) + "/" + fragSpv));
+    VkPipelineShaderStageCreateInfo vs{
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    vs.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vs.module = vert;
+    vs.pName = "main";
+    VkPipelineShaderStageCreateInfo fs{
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    fs.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fs.module = frag;
+    fs.pName = "main";
+    VkPipelineShaderStageCreateInfo stages[] = {vs, fs};
+
+    VkPipelineVertexInputStateCreateInfo vi{
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    if (bind) {
+      vi.vertexBindingDescriptionCount = 1;
+      vi.pVertexBindingDescriptions = bind;
+      vi.vertexAttributeDescriptionCount = attrCount;
+      vi.pVertexAttributeDescriptions = attr;
+    }
+
+    VkPipelineInputAssemblyStateCreateInfo ia{
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo vp{
+        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vp.viewportCount = 1;
+    vp.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rs{
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms{
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo ds{
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthTestEnable = depthTest ? VK_TRUE : VK_FALSE;
+    ds.depthWriteEnable = depthTest ? VK_TRUE : VK_FALSE;
+    ds.depthCompareOp = VK_COMPARE_OP_LESS;
+
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    cba.blendEnable = VK_FALSE;
+    VkPipelineColorBlendStateCreateInfo cb{
+        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cb.attachmentCount = 1;
+    cb.pAttachments = &cba;
+
+    std::array<VkDynamicState, 2> dynStates = {VK_DYNAMIC_STATE_VIEWPORT,
+                                               VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dyn{
+        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dyn.dynamicStateCount = (uint32_t)dynStates.size();
+    dyn.pDynamicStates = dynStates.data();
+
+    VkGraphicsPipelineCreateInfo ci{
+        VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    ci.stageCount = 2;
+    ci.pStages = stages;
+    ci.pVertexInputState = &vi;
+    ci.pInputAssemblyState = &ia;
+    ci.pViewportState = &vp;
+    ci.pRasterizationState = &rs;
+    ci.pMultisampleState = &ms;
+    ci.pDepthStencilState = &ds;
+    ci.pColorBlendState = &cb;
+    ci.pDynamicState = &dyn;
+    ci.layout = layout;
+    ci.renderPass = pass;
+    ci.subpass = 0;
+    VkPipeline pipeline;
+    vkCheck(vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &ci, nullptr,
+                                      &pipeline),
+            "vkCreateGraphicsPipelines(fluid)");
+    vkDestroyShaderModule(device_, vert, nullptr);
+    vkDestroyShaderModule(device_, frag, nullptr);
+    return pipeline;
+  }
+
   void createCommandPoolAndBuffers() {
     VkCommandPoolCreateInfo ci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -1149,7 +1577,7 @@ private:
   }
 
   void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex,
-                           const PushConstants &pc, int substeps) {
+                           const DepthPush &dp, int substeps) {
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkCheck(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer");
 
@@ -1183,11 +1611,68 @@ private:
                          VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &toVertex, 0,
                          nullptr, 0, nullptr);
 
-    // rendering stage
+    VkViewport viewport{0.0f, 0.0f, (float)swapchainExtent_.width,
+                        (float)swapchainExtent_.height, 0.0f, 1.0f};
+    VkRect2D scissor{{0, 0}, swapchainExtent_};
+
+    // Render spheres to depth target
+    std::array<VkClearValue, 2> depthClears{};
+    depthClears[0].color = {{1.0e4f, 0.0f, 0.0f, 0.0f}}; // "empty" depth
+    depthClears[1].depthStencil = {1.0f, 0};
+    VkRenderPassBeginInfo drp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    drp.renderPass = fluidDepthPass_;
+    drp.framebuffer = fluidDepthFB_;
+    drp.renderArea.offset = {0, 0};
+    drp.renderArea.extent = swapchainExtent_;
+    drp.clearValueCount = (uint32_t)depthClears.size();
+    drp.pClearValues = depthClears.data();
+    vkCmdBeginRenderPass(cmd, &drp, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, depthPipeline_);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdPushConstants(cmd, depthPipelineLayout_,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(DepthPush), &dp);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            depthPipelineLayout_, 0, 1, &descriptorSet_, 0,
+                            nullptr);
+    VkBuffer vbs[] = {quadBuffer_};
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, vbs, offsets);
+    if (numParticles_ > 0)
+      vkCmdDraw(cmd, 6, numParticles_, 0, 0);
+    vkCmdEndRenderPass(cmd);
+
+    // Bilateral blur using two passes
+    auto blurPass = [&](VkFramebuffer fb, VkDescriptorSet src, float dx,
+                        float dy) {
+      VkRenderPassBeginInfo brp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+      brp.renderPass = blurPass_;
+      brp.framebuffer = fb;
+      brp.renderArea.offset = {0, 0};
+      brp.renderArea.extent = swapchainExtent_;
+      brp.clearValueCount = 0;
+      vkCmdBeginRenderPass(cmd, &brp, VK_SUBPASS_CONTENTS_INLINE);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline_);
+      vkCmdSetViewport(cmd, 0, 1, &viewport);
+      vkCmdSetScissor(cmd, 0, 1, &scissor);
+      float bpc[4] = {dx, dy, 0.5f, 12.0f}; // dir, depthFalloff, radius(px)
+      vkCmdPushConstants(cmd, blurPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
+                         0, sizeof(bpc), bpc);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              blurPipelineLayout_, 0, 1, &src, 0, nullptr);
+      vkCmdDraw(cmd, 3, 1, 0, 0);
+      vkCmdEndRenderPass(cmd);
+    };
+    float invW = 1.0f / (float)swapchainExtent_.width;
+    float invH = 1.0f / (float)swapchainExtent_.height;
+    blurPass(blurTempFB_, blurSetH_, invW, 0.0f);   // horizontal
+    blurPass(blurSmoothFB_, blurSetV_, 0.0f, invH); // vertical
+
+    // composite into swapchain image
     std::array<VkClearValue, 2> clears{};
     clears[0].color = {{0.02f, 0.03f, 0.06f, 1.0f}};
     clears[1].depthStencil = {1.0f, 0};
-
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = renderPass_;
     rp.framebuffer = framebuffers_[imageIndex];
@@ -1196,37 +1681,41 @@ private:
     rp.clearValueCount = (uint32_t)clears.size();
     rp.pClearValues = clears.data();
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
-
-    VkViewport viewport{};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = (float)swapchainExtent_.width;
-    viewport.height = (float)swapchainExtent_.height;
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compositePipeline_);
     vkCmdSetViewport(cmd, 0, 1, &viewport);
-    VkRect2D scissor{{0, 0}, swapchainExtent_};
     vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-    vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
-                       sizeof(PushConstants), &pc);
+    float compPC[4] = {8.0f, 20.0f, 0.0f, 0.0f}; // debug depth ramp: near, far
+    vkCmdPushConstants(cmd, compositePipelineLayout_,
+                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(compPC), compPC);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipelineLayout_, 0, 1, &descriptorSet_, 0, nullptr);
-
-    VkBuffer vbs[] = {quadBuffer_};
-    VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, vbs, offsets);
-
-    if (numParticles_ > 0)
-      vkCmdDraw(cmd, 6, numParticles_, 0, 0);
-
+                            compositePipelineLayout_, 0, 1, &compositeSet_, 0,
+                            nullptr);
+    vkCmdDraw(cmd, 3, 1, 0, 0); // fullscreen triangle
     vkCmdEndRenderPass(cmd);
+
     vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
   }
 
+  void destroyFluidSizedTargets() {
+    if (fluidDepthFB_) { vkDestroyFramebuffer(device_, fluidDepthFB_, nullptr); fluidDepthFB_ = VK_NULL_HANDLE; }
+    if (fluidDepthView_) { vkDestroyImageView(device_, fluidDepthView_, nullptr); fluidDepthView_ = VK_NULL_HANDLE; }
+    if (fluidDepthImage_) { vkDestroyImage(device_, fluidDepthImage_, nullptr); fluidDepthImage_ = VK_NULL_HANDLE; }
+    if (fluidDepthMem_) { vkFreeMemory(device_, fluidDepthMem_, nullptr); fluidDepthMem_ = VK_NULL_HANDLE; }
+    if (fluidZView_) { vkDestroyImageView(device_, fluidZView_, nullptr); fluidZView_ = VK_NULL_HANDLE; }
+    if (fluidZImage_) { vkDestroyImage(device_, fluidZImage_, nullptr); fluidZImage_ = VK_NULL_HANDLE; }
+    if (fluidZMem_) { vkFreeMemory(device_, fluidZMem_, nullptr); fluidZMem_ = VK_NULL_HANDLE; }
+    if (blurTempFB_) { vkDestroyFramebuffer(device_, blurTempFB_, nullptr); blurTempFB_ = VK_NULL_HANDLE; }
+    if (blurSmoothFB_) { vkDestroyFramebuffer(device_, blurSmoothFB_, nullptr); blurSmoothFB_ = VK_NULL_HANDLE; }
+    if (blurTempView_) { vkDestroyImageView(device_, blurTempView_, nullptr); blurTempView_ = VK_NULL_HANDLE; }
+    if (blurTempImage_) { vkDestroyImage(device_, blurTempImage_, nullptr); blurTempImage_ = VK_NULL_HANDLE; }
+    if (blurTempMem_) { vkFreeMemory(device_, blurTempMem_, nullptr); blurTempMem_ = VK_NULL_HANDLE; }
+    if (blurSmoothView_) { vkDestroyImageView(device_, blurSmoothView_, nullptr); blurSmoothView_ = VK_NULL_HANDLE; }
+    if (blurSmoothImage_) { vkDestroyImage(device_, blurSmoothImage_, nullptr); blurSmoothImage_ = VK_NULL_HANDLE; }
+    if (blurSmoothMem_) { vkFreeMemory(device_, blurSmoothMem_, nullptr); blurSmoothMem_ = VK_NULL_HANDLE; }
+  }
+
   void cleanupSwapchain() {
+    destroyFluidSizedTargets();
     if (depthView_) vkDestroyImageView(device_, depthView_, nullptr);
     if (depthImage_) vkDestroyImage(device_, depthImage_, nullptr);
     if (depthMemory_) vkFreeMemory(device_, depthMemory_, nullptr);
@@ -1258,6 +1747,8 @@ private:
     createImageViews();
     createDepthResources();
     createFramebuffers();
+    createFluidTargets();
+    updateFluidDescriptors();
   }
 };
 

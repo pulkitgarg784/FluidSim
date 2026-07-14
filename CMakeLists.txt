@@ -28,6 +28,11 @@ file(MAKE_DIRECTORY ${SHADER_OUT_DIR})
 set(SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_depth.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_depth.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fullscreen.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_blur.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_composite.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_external.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_hash_keys.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_reorder.comp
