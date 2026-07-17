@@ -48,15 +48,12 @@ set(SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_blur.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_composite.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_external.comp
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_hash_keys.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_reorder.comp
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_copyback.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_start_reset.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_start_indices.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_density.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_pressure.comp
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_viscosity.comp
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_integrate.comp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_viscosity_integrate.comp)
 
 set(SPIRV_OUTPUTS)
 foreach(SHADER ${SHADER_SOURCES})

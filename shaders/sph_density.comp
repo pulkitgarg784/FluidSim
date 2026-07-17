@@ -1,11 +1,7 @@
 #version 450
 layout(local_size_x = 256) in;
 
-layout(std430, binding = 0) buffer Positions      { vec4 positions[];      };
-layout(std430, binding = 1) buffer Velocities     { vec4 velocities[];     };
-layout(std430, binding = 2) buffer Predicted      { vec4 predicted[];      };
-layout(std430, binding = 3) buffer Densities      { float densities[];     };
-layout(std430, binding = 4) buffer ViscForces     { vec4 viscForces[];     };
+layout(std430, binding = 3) buffer Densities { float densities[]; };
 layout(std140, binding = 5) uniform Params {
   vec4 gravity;
   vec4 boundsSize;
@@ -19,44 +15,51 @@ layout(std140, binding = 5) uniform Params {
   float spikyPow2Scale;
   float spikyPow2GradScale;
   float poly6Scale;
-  uint  numParticles;
+  uint numParticles;
   float epsilon;
-  uint  paddedCount;
+  uvec4 grid;
 } P;
-layout(std430, binding = 6) buffer SpatialKeys    { uint spatialKeys[];    };
-layout(std430, binding = 7) buffer SpatialIndices { uint spatialIndices[]; };
-layout(std430, binding = 8) buffer StartIndices   { uint startIndices[];   };
+layout(std430, binding = 6) readonly buffer SpatialKeys { uint spatialKeys[]; };
+layout(std430, binding = 8) readonly buffer StartIndices { uint startIndices[]; };
+layout(std430, binding = 11) readonly buffer SortedPred { vec4 sortedPred[]; };
 
-ivec3 cellCoord(vec3 p) { return ivec3(floor(p / P.smoothingRadius)); }
+ivec3 gridCell(vec3 p) {
+  ivec3 c = ivec3(floor((p + 0.5 * P.boundsSize.xyz) / P.smoothingRadius)) + ivec3(1);
+  return clamp(c, ivec3(0), ivec3(P.grid.xyz) - ivec3(1));
+}
 uint cellKey(ivec3 c) {
-  uint a = uint(c.x) * 15823u;
-  uint b = uint(c.y) * 9737333u;
-  uint cc = uint(c.z) * 440817757u;
-  return (a + b + cc) % P.numParticles;
+  return (uint(c.z) * P.grid.y + uint(c.y)) * P.grid.x + uint(c.x);
+}
+bool validCell(ivec3 c) {
+  return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, ivec3(P.grid.xyz)));
 }
 
 void main() {
   uint idx = gl_GlobalInvocationID.x;
   if (idx >= P.numParticles) return;
 
-  vec3 pi = predicted[idx].xyz;
-  ivec3 center = cellCoord(pi);
+  vec3 pi = sortedPred[idx].xyz;
+  ivec3 center = gridCell(pi);
+  float h = P.smoothingRadius;
+  float h2 = h * h;
   float density = 0.0;
 
-  for (int dz = -1; dz <= 1; dz++)
-  for (int dy = -1; dy <= 1; dy++)
-  for (int dx = -1; dx <= 1; dx++) {
-    uint key = cellKey(center + ivec3(dx, dy, dz));
+  for (int dz = -1; dz <= 1; ++dz)
+  for (int dy = -1; dy <= 1; ++dy)
+  for (int dx = -1; dx <= 1; ++dx) {
+    ivec3 cell = center + ivec3(dx, dy, dz);
+    if (!validCell(cell)) continue;
+    uint key = cellKey(cell);
     uint start = startIndices[key];
     if (start == 0xffffffffu) continue;
-    for (uint e = start; e < P.numParticles && spatialKeys[e] == key; e++) {
-      uint j = e; // data is now in sorted order
-      float dst = length(predicted[j].xyz - pi);
-      if (dst < P.smoothingRadius) {
-        float v = P.smoothingRadius - dst;
-        density += P.particleMass * (v * v * P.spikyPow2Scale);
+    for (uint e = start; e < P.numParticles && spatialKeys[e] == key; ++e) {
+      vec3 offset = sortedPred[e].xyz - pi;
+      float dst2 = dot(offset, offset);
+      if (dst2 < h2) {
+        float v = h - sqrt(dst2);
+        density += P.particleMass * v * v * P.spikyPow2Scale;
       }
     }
   }
-  densities[idx] = density;
+  densities[idx] = max(density, P.epsilon);
 }

@@ -1,11 +1,7 @@
 #version 450
 layout(local_size_x = 256) in;
 
-layout(std430, binding = 0) buffer Positions      { vec4 positions[];      };
-layout(std430, binding = 1) buffer Velocities     { vec4 velocities[];     };
-layout(std430, binding = 2) buffer Predicted      { vec4 predicted[];      };
-layout(std430, binding = 3) buffer Densities      { float densities[];     };
-layout(std430, binding = 4) buffer ViscForces     { vec4 viscForces[];     };
+layout(std430, binding = 3) readonly buffer Densities { float densities[]; };
 layout(std140, binding = 5) uniform Params {
   vec4 gravity;
   vec4 boundsSize;
@@ -19,34 +15,34 @@ layout(std140, binding = 5) uniform Params {
   float spikyPow2Scale;
   float spikyPow2GradScale;
   float poly6Scale;
-  uint  numParticles;
+  uint numParticles;
   float epsilon;
-  uint  paddedCount;
+  uvec4 grid;
 } P;
-layout(std430, binding = 6) buffer SpatialKeys    { uint spatialKeys[];    };
-layout(std430, binding = 7) buffer SpatialIndices { uint spatialIndices[]; };
-layout(std430, binding = 8) buffer StartIndices   { uint startIndices[];   };
+layout(std430, binding = 6) readonly buffer SpatialKeys { uint spatialKeys[]; };
+layout(std430, binding = 8) readonly buffer StartIndices { uint startIndices[]; };
+layout(std430, binding = 10) buffer SortedVel { vec4 sortedVel[]; };
+layout(std430, binding = 11) readonly buffer SortedPred { vec4 sortedPred[]; };
 
-ivec3 cellCoord(vec3 p) { return ivec3(floor(p / P.smoothingRadius)); }
-uint cellKey(ivec3 c) {
-  uint a = uint(c.x) * 15823u;
-  uint b = uint(c.y) * 9737333u;
-  uint cc = uint(c.z) * 440817757u;
-  return (a + b + cc) % P.numParticles;
+ivec3 gridCell(vec3 p) {
+  ivec3 c = ivec3(floor((p + 0.5 * P.boundsSize.xyz) / P.smoothingRadius)) + ivec3(1);
+  return clamp(c, ivec3(0), ivec3(P.grid.xyz) - ivec3(1));
 }
-
+uint cellKey(ivec3 c) {
+  return (uint(c.z) * P.grid.y + uint(c.y)) * P.grid.x + uint(c.x);
+}
+bool validCell(ivec3 c) {
+  return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, ivec3(P.grid.xyz)));
+}
 float pressureFromDensity(float d) {
   return (d - P.targetDensity) * P.pressureMultiplier;
 }
-
 vec3 randomDir(uint seed) {
   seed = seed * 747796405u + 2891336453u;
   uint w = ((seed >> ((seed >> 28) + 4u)) ^ seed) * 277803737u;
   w = (w >> 22) ^ w;
-  float u1 = float(w & 0xffffu) / 65535.0;
-  float u2 = float((w >> 16) & 0xffffu) / 65535.0;
-  float z = u1 * 2.0 - 1.0;
-  float a = u2 * 6.28318530718;
+  float z = float(w & 0xffffu) * (2.0 / 65535.0) - 1.0;
+  float a = float((w >> 16) & 0xffffu) * (6.28318530718 / 65535.0);
   float r = sqrt(max(0.0, 1.0 - z * z));
   return vec3(r * cos(a), r * sin(a), z);
 }
@@ -55,34 +51,37 @@ void main() {
   uint idx = gl_GlobalInvocationID.x;
   if (idx >= P.numParticles) return;
 
-  vec3 pi = predicted[idx].xyz;
-  float di = densities[idx];
+  vec3 pi = sortedPred[idx].xyz;
+  float di = max(densities[idx], P.epsilon);
   float pressureI = pressureFromDensity(di);
-  ivec3 center = cellCoord(pi);
-
+  float h = P.smoothingRadius;
+  float h2 = h * h;
+  ivec3 center = gridCell(pi);
   vec3 force = vec3(0.0);
-  for (int dz = -1; dz <= 1; dz++)
-  for (int dy = -1; dy <= 1; dy++)
-  for (int dx = -1; dx <= 1; dx++) {
-    uint key = cellKey(center + ivec3(dx, dy, dz));
+
+  for (int dz = -1; dz <= 1; ++dz)
+  for (int dy = -1; dy <= 1; ++dy)
+  for (int dx = -1; dx <= 1; ++dx) {
+    ivec3 cell = center + ivec3(dx, dy, dz);
+    if (!validCell(cell)) continue;
+    uint key = cellKey(cell);
     uint start = startIndices[key];
     if (start == 0xffffffffu) continue;
-    for (uint e = start; e < P.numParticles && spatialKeys[e] == key; e++) {
-      uint j = e; // data is now in sorted order
-      if (j == idx) continue;
-      vec3 offset = predicted[j].xyz - pi;
-      float dst = length(offset);
-      if (dst >= P.smoothingRadius) continue;
-
-      vec3 dir = (dst < P.epsilon) ? randomDir(idx * P.numParticles + j)
+    for (uint e = start; e < P.numParticles && spatialKeys[e] == key; ++e) {
+      if (e == idx) continue;
+      vec3 offset = sortedPred[e].xyz - pi;
+      float dst2 = dot(offset, offset);
+      if (dst2 >= h2) continue;
+      float dst = sqrt(dst2);
+      vec3 dir = (dst < P.epsilon) ? randomDir(idx * P.numParticles + e)
                                    : offset / dst;
-      float slope = (dst - P.smoothingRadius) * P.spikyPow2GradScale;
-      float dj = densities[j];
+      float dj = max(densities[e], P.epsilon);
       float sharedPressure = 0.5 * (pressureFromDensity(dj) + pressureI);
+      float slope = (dst - h) * P.spikyPow2GradScale;
       force += sharedPressure * dir * slope * P.particleMass / dj;
     }
   }
 
-  vec3 accel = force / di;
-  velocities[idx] = vec4(velocities[idx].xyz + accel * P.deltaT, 0.0);
+  vec3 velocity = sortedVel[idx].xyz + (force / di) * P.deltaT;
+  sortedVel[idx] = vec4(velocity, 0.0);
 }

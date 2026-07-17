@@ -1,6 +1,10 @@
 #include <chrono>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <iostream>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <imgui.h>
@@ -150,17 +154,52 @@ static float3 mouseRayDirection(double mouseX, double mouseY, int width,
   return normalize(dir);
 }
 
-int main() {
+int main(int argc, char **argv) {
   constexpr int width = 1024;
   constexpr int height = 768;
 
-  sph::FluidSim sim;
-  sim.initialize();
+  uint32_t particleCount = sph::maxParticles;
+  if (argc > 1) {
+    if (argc != 3 || std::string(argv[1]) != "--particles") {
+      std::fprintf(stderr, "Usage: %s [--particles 1..%d]\n", argv[0],
+                   sph::maxParticles);
+      return 1;
+    }
+    try {
+      unsigned long requested = std::stoul(argv[2]);
+      if (requested == 0 || requested > (unsigned long)sph::maxParticles)
+        throw std::out_of_range("particle count");
+      particleCount = static_cast<uint32_t>(requested);
+    } catch (const std::exception &) {
+      std::fprintf(stderr, "Particle count must be between 1 and %d\n",
+                   sph::maxParticles);
+      return 1;
+    }
+  }
+
+  const float densityRatio =
+      float(particleCount) / float(sph::referenceParticleCount);
+  const float particleScale = std::cbrt(1.0f / densityRatio);
+  const float smoothingRadius = 0.12f * particleScale;
+  const float particleMass = 1.0f / densityRatio;
+  const float simulationDeltaT = 0.002f * particleScale;
+  const float renderRadius = 0.068f * particleScale;
+
+  uint32_t gridX = uint32_t(std::ceil(sph::boundsSize.x / smoothingRadius)) + 2u;
+  uint32_t gridY = uint32_t(std::ceil(sph::boundsSize.y / smoothingRadius)) + 2u;
+  uint32_t gridZ = uint32_t(std::ceil(sph::boundsSize.z / smoothingRadius)) + 2u;
+  uint64_t gridCells64 = uint64_t(gridX) * gridY * gridZ;
+  if (gridCells64 > uint64_t(particleCount) * 2u) {
+    return 1;
+  }
+
+  std::cout << "Starting " << particleCount << " particles; h="
+            << smoothingRadius << ", grid=" << gridX << 'x' << gridY << 'x'
+            << gridZ << std::endl;
 
   vkr::VulkanRenderer renderer;
   try {
-    renderer.init(width, height, "CS488 Final Project",
-                  (uint32_t)sph::numParticles);
+    renderer.init(width, height, "CS488 Final Project", particleCount);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "Renderer init failed: %s\n", e.what());
     return 1;
@@ -185,29 +224,44 @@ int main() {
   params.boundsSize[0] = sph::boundsSize.x;
   params.boundsSize[1] = sph::boundsSize.y;
   params.boundsSize[2] = sph::boundsSize.z;
-  params.deltaT = sph::deltaT;
-  params.smoothingRadius = sph::smoothingRadius;
-  params.particleMass = sph::particleMass;
+  params.deltaT = simulationDeltaT;
+  params.smoothingRadius = smoothingRadius;
+  params.particleMass = particleMass;
   params.targetDensity = sph::targetDensity;
   params.pressureMultiplier = sph::pressureMultiplier;
   params.viscosityStrength = sph::viscosityStrength;
   params.collisionDamping = sph::collisionDamping;
-  params.spikyPow2Scale = sph::Pow2Scale;
-  params.spikyPow2GradScale = sph::Pow2GradScale;
-  params.poly6Scale = sph::viscocityScale;
-  params.numParticles = (uint32_t)sph::numParticles;
+  const float h2 = smoothingRadius * smoothingRadius;
+  const float h5 = h2 * h2 * smoothingRadius;
+  const float h9 = h2 * h2 * h2 * h2 * smoothingRadius;
+  params.spikyPow2Scale = 15.0f / (2.0f * PI * h5);
+  params.spikyPow2GradScale = 15.0f / (PI * h5);
+  params.poly6Scale = 315.0f / (64.0f * PI * h9);
+  params.numParticles = particleCount;
   params.epsilon = sph::Epsilon;
+  params.grid[0] = gridX;
+  params.grid[1] = gridY;
+  params.grid[2] = gridZ;
+  params.grid[3] = static_cast<uint32_t>(gridCells64);
   renderer.setParams(params);
 
-  // copy initial particle positions and velocities into GPU buffers
-  std::vector<float4> initPos(sph::numParticles), initVel(sph::numParticles);
-  for (int i = 0; i < sph::numParticles; i++) {
-    initPos[i] = float4(sim.particles[i].position, 0.0f);
-    initVel[i] = float4(sim.particles[i].velocity, 0.0f);
+  std::vector<float4> initPos(particleCount), initVel(particleCount);
+  const float3 half = sph::boundsSize * 0.5f;
+  const float slab = sph::boundsSize.x * 0.2f;
+  for (uint32_t i = 0; i < particleCount; ++i) {
+    bool leftEdge = i < particleCount / 2u;
+    float x = leftEdge ? (-half.x + sph::PCG32::rand() * slab)
+                       : (half.x - sph::PCG32::rand() * slab);
+    float y = (sph::PCG32::rand() - 0.5f) * sph::boundsSize.y;
+    float z = (sph::PCG32::rand() - 0.5f) * sph::boundsSize.z;
+    initPos[i] = float4(x, y, z, 0.0f);
+    initVel[i] = float4(0.0f);
   }
   renderer.uploadInitialState(initPos, initVel);
-
-  const float renderRadius = 0.068f;
+  initPos.clear();
+  initVel.clear();
+  initPos.shrink_to_fit();
+  initVel.shrink_to_fit();
 
   double lastTime = glfwGetTime();
 
@@ -247,7 +301,6 @@ int main() {
           float(framebufferWidth) / float(framebufferHeight);
       const float4x4 proj = perspectiveVK(45.0f, aspect, 0.01f, 100.0f);
       const float4x4 view = lookAt(globalEye, globalLookat, globalUp);
-      const float4x4 viewProj = mul(proj, view);
 
       // Shift+Left click attracts the fluid, Shift+Right click repels it.
       const bool shiftHeld =
@@ -275,7 +328,7 @@ int main() {
 
       // the simulation now runs entirely on the GPU inside drawFrame
       renderer.drawFrame(view, proj, globalRight, camUp, renderRadius,
-                         sph::simIterationsPerFrame);
+                         renderer.simulationSubsteps());
 
       // Update FPS counter
       frameCount++;
@@ -287,7 +340,9 @@ int main() {
         fps = frameCount / elapsed;
         frameCount = 0;
         fpsStartTime = currentTime;
-        std::cout << "FPS: " << fps << std::endl;
+        std::cout << "FPS: " << fps << " (" << particleCount
+                  << " particles, " << renderer.simulationSubsteps()
+                  << " substeps)" << std::endl;
       }
     }
     renderer.waitIdle();

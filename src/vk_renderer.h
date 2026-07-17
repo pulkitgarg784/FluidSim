@@ -4,9 +4,9 @@
 #include <GLFW/glfw3.h>
 #include <vulkan/vulkan.h>
 
-#include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_vulkan.h>
+#include <imgui.h>
 
 #include <array>
 #include <cstring>
@@ -29,21 +29,21 @@ using namespace linalg::aliases;
 
 // OS detection macros
 #if defined(__APPLE__)
-  #define VKR_OS_MACOS 1
-  #define VKR_OS_LINUX 0
-  #define VKR_OS_WINDOWS 0
+#define VKR_OS_MACOS 1
+#define VKR_OS_LINUX 0
+#define VKR_OS_WINDOWS 0
 #elif defined(__linux__)
-  #define VKR_OS_MACOS 0
-  #define VKR_OS_LINUX 1
-  #define VKR_OS_WINDOWS 0
+#define VKR_OS_MACOS 0
+#define VKR_OS_LINUX 1
+#define VKR_OS_WINDOWS 0
 #elif defined(_WIN32)
-  #define VKR_OS_MACOS 0
-  #define VKR_OS_LINUX 0
-  #define VKR_OS_WINDOWS 1
+#define VKR_OS_MACOS 0
+#define VKR_OS_LINUX 0
+#define VKR_OS_WINDOWS 1
 #else
-  #define VKR_OS_MACOS 0
-  #define VKR_OS_LINUX 0
-  #define VKR_OS_WINDOWS 0
+#define VKR_OS_MACOS 0
+#define VKR_OS_LINUX 0
+#define VKR_OS_WINDOWS 0
 #endif
 
 namespace vkr {
@@ -64,9 +64,10 @@ struct SphParams {
   float poly6Scale;
   uint32_t numParticles;
   float epsilon;
-  uint32_t paddedCount; // num particles rounded up to a power of two
-  uint32_t _pad0, _pad1, _pad2; // round the block up to a 16-byte multiple, compiler warning
+  uint32_t grid[4]; // xyz = exact grid dimensions, w = total cells
 };
+static_assert(sizeof(SphParams) == 96,
+              "SphParams must match the std140 shader block");
 
 // Push-constant block
 // has to match particle.vert
@@ -80,7 +81,7 @@ struct PushConstants {
 struct InteractionParams {
   float point[4];
   float radius;
-  float strength;// > 0 attract, < 0 repel
+  float strength; // > 0 attract, < 0 repel
   float _pad0, _pad1;
 };
 
@@ -95,6 +96,8 @@ struct DepthPush {
 struct FluidRenderSettings {
   float blurRadius = 8.0f;
   float depthFalloff = 50.0f;
+  int simulationSubsteps = 1;
+  float simulationRate = 4.0f;
 };
 
 inline void vkCheck(VkResult r, const char *what) {
@@ -180,30 +183,43 @@ public:
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
-    ImGui::Begin("Fluid surface controls");
+    ImGui::Begin("Fluid controls");
+    ImGui::Text("Particles: %u", numParticles_);
+    ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+    ImGui::SliderInt("Simulation substeps", &fluidSettings_.simulationSubsteps,
+                     1, 6);
+    ImGui::SliderFloat("Simulation rate", &fluidSettings_.simulationRate, 0.25f,
+                       10.0f, "%.2fx", ImGuiSliderFlags_Logarithmic);
+    float frameDt = baseDeltaT_ * fluidSettings_.simulationRate;
+    ImGui::Text("Simulation dt/frame: %.4f", frameDt);
+    ImGui::TextUnformatted("Substeps improve quality without changing speed.");
+    ImGui::Separator();
     ImGui::TextUnformatted("Screen-space reconstruction");
-    ImGui::SliderFloat("Blur radius (px)", &fluidSettings_.blurRadius,
-                       0.0f, 20.0f, "%.1f");
-    ImGui::SliderFloat("Depth falloff", &fluidSettings_.depthFalloff,
-                       0.1f, 250.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+    ImGui::SliderFloat("Blur radius (px)", &fluidSettings_.blurRadius, 0.0f,
+                       20.0f, "%.1f");
+    ImGui::SliderFloat("Depth falloff", &fluidSettings_.depthFalloff, 0.1f,
+                       250.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
     ImGui::TextUnformatted("Click and drag outside this panel to orbit.");
     ImGui::End();
   }
 
-  // Write the SPH parameter block to UBO
-  void setParams(SphParams params) {
-    params.paddedCount = paddedCount_;
+  int simulationSubsteps() const { return fluidSettings_.simulationSubsteps; }
+
+  void setParams(const SphParams &params) {
+    if (params.grid[3] > startCapacity_)
+      throw std::runtime_error("SPH grid exceeds start-index buffer capacity");
+    gridCellCount_ = params.grid[3];
+    baseDeltaT_ = params.deltaT;
     std::memcpy(paramsMapped_, &params, sizeof(SphParams));
   }
 
   void setInteraction(const float3 &worldPoint, float radius, float strength) {
-    InteractionParams ip{};
-    ip.point[0] = worldPoint.x;
-    ip.point[1] = worldPoint.y;
-    ip.point[2] = worldPoint.z;
-    ip.radius = radius;
-    ip.strength = strength;
-    std::memcpy(interactionMapped_, &ip, sizeof(InteractionParams));
+    pendingInteraction_ = {};
+    pendingInteraction_.point[0] = worldPoint.x;
+    pendingInteraction_.point[1] = worldPoint.y;
+    pendingInteraction_.point[2] = worldPoint.z;
+    pendingInteraction_.radius = radius;
+    pendingInteraction_.strength = strength;
   }
 
   void uploadInitialState(const std::vector<float4> &positions,
@@ -220,6 +236,12 @@ public:
                  int substeps) {
     vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE,
                     UINT64_MAX);
+
+    auto *liveParams = reinterpret_cast<SphParams *>(paramsMapped_);
+    liveParams->deltaT = baseDeltaT_ * fluidSettings_.simulationRate /
+                         float(std::max(substeps, 1));
+    std::memcpy(interactionMapped_, &pendingInteraction_,
+                sizeof(InteractionParams));
 
     uint32_t imageIndex = 0;
     VkResult acquire = vkAcquireNextImageKHR(
@@ -259,8 +281,7 @@ public:
     submit.pWaitDstStageMask = waitStages;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cmd;
-    VkSemaphore signalSemaphores[] = {
-        renderFinishedSemaphores_[imageIndex]};
+    VkSemaphore signalSemaphores[] = {renderFinishedSemaphores_[imageIndex]};
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = signalSemaphores;
     vkCheck(vkQueueSubmit(graphicsQueue_, 1, &submit,
@@ -304,26 +325,41 @@ public:
     cleanupSwapchain();
 
     for (VkPipeline p : computePipelines_)
-      if (p) vkDestroyPipeline(device_, p, nullptr);
+      if (p)
+        vkDestroyPipeline(device_, p, nullptr);
     if (computePipelineLayout_)
       vkDestroyPipelineLayout(device_, computePipelineLayout_, nullptr);
-    if (pipeline_) vkDestroyPipeline(device_, pipeline_, nullptr);
-    if (pipelineLayout_) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
+    if (pipeline_)
+      vkDestroyPipeline(device_, pipeline_, nullptr);
+    if (pipelineLayout_)
+      vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
 
     // fluid rendering
-    if (compositePipeline_) vkDestroyPipeline(device_, compositePipeline_, nullptr);
-    if (compositePipelineLayout_) vkDestroyPipelineLayout(device_, compositePipelineLayout_, nullptr);
-    if (blurPipeline_) vkDestroyPipeline(device_, blurPipeline_, nullptr);
-    if (blurPipelineLayout_) vkDestroyPipelineLayout(device_, blurPipelineLayout_, nullptr);
-    if (blurPass_) vkDestroyRenderPass(device_, blurPass_, nullptr);
-    if (compositePool_) vkDestroyDescriptorPool(device_, compositePool_, nullptr);
-    if (compositeSetLayout_) vkDestroyDescriptorSetLayout(device_, compositeSetLayout_, nullptr);
-    if (depthPipeline_) vkDestroyPipeline(device_, depthPipeline_, nullptr);
-    if (depthPipelineLayout_) vkDestroyPipelineLayout(device_, depthPipelineLayout_, nullptr);
-    if (fluidSampler_) vkDestroySampler(device_, fluidSampler_, nullptr);
-    if (fluidDepthPass_) vkDestroyRenderPass(device_, fluidDepthPass_, nullptr);
+    if (compositePipeline_)
+      vkDestroyPipeline(device_, compositePipeline_, nullptr);
+    if (compositePipelineLayout_)
+      vkDestroyPipelineLayout(device_, compositePipelineLayout_, nullptr);
+    if (blurPipeline_)
+      vkDestroyPipeline(device_, blurPipeline_, nullptr);
+    if (blurPipelineLayout_)
+      vkDestroyPipelineLayout(device_, blurPipelineLayout_, nullptr);
+    if (blurPass_)
+      vkDestroyRenderPass(device_, blurPass_, nullptr);
+    if (compositePool_)
+      vkDestroyDescriptorPool(device_, compositePool_, nullptr);
+    if (compositeSetLayout_)
+      vkDestroyDescriptorSetLayout(device_, compositeSetLayout_, nullptr);
+    if (depthPipeline_)
+      vkDestroyPipeline(device_, depthPipeline_, nullptr);
+    if (depthPipelineLayout_)
+      vkDestroyPipelineLayout(device_, depthPipelineLayout_, nullptr);
+    if (fluidSampler_)
+      vkDestroySampler(device_, fluidSampler_, nullptr);
+    if (fluidDepthPass_)
+      vkDestroyRenderPass(device_, fluidDepthPass_, nullptr);
 
-    if (renderPass_) vkDestroyRenderPass(device_, renderPass_, nullptr);
+    if (renderPass_)
+      vkDestroyRenderPass(device_, renderPass_, nullptr);
 
     if (descriptorPool_)
       vkDestroyDescriptorPool(device_, descriptorPool_, nullptr);
@@ -334,7 +370,6 @@ public:
     destroyBuffer(velocitiesBuf_, velocitiesMem_);
     destroyBuffer(predictedBuf_, predictedMem_);
     destroyBuffer(densitiesBuf_, densitiesMem_);
-    destroyBuffer(viscForceBuf_, viscForceMem_);
     destroyBuffer(keysBuf_, keysMem_);
     destroyBuffer(indicesBuf_, indicesMem_);
     destroyBuffer(startBuf_, startMem_);
@@ -355,7 +390,8 @@ public:
     }
 
     for (auto sem : renderFinishedSemaphores_)
-      if (sem) vkDestroySemaphore(device_, sem, nullptr);
+      if (sem)
+        vkDestroySemaphore(device_, sem, nullptr);
     renderFinishedSemaphores_.clear();
     for (int i = 0; i < kMaxFramesInFlight; i++) {
       if (imageAvailableSemaphores_[i])
@@ -363,11 +399,15 @@ public:
       if (inFlightFences_[i])
         vkDestroyFence(device_, inFlightFences_[i], nullptr);
     }
-    if (commandPool_) vkDestroyCommandPool(device_, commandPool_, nullptr);
+    if (commandPool_)
+      vkDestroyCommandPool(device_, commandPool_, nullptr);
     vkDestroyDevice(device_, nullptr);
-    if (surface_) vkDestroySurfaceKHR(instance_, surface_, nullptr);
-    if (instance_) vkDestroyInstance(instance_, nullptr);
-    if (window_) glfwDestroyWindow(window_);
+    if (surface_)
+      vkDestroySurfaceKHR(instance_, surface_, nullptr);
+    if (instance_)
+      vkDestroyInstance(instance_, nullptr);
+    if (window_)
+      glfwDestroyWindow(window_);
     glfwTerminate();
     device_ = VK_NULL_HANDLE;
   }
@@ -384,7 +424,8 @@ public:
   }
 
   void uploadViaStaging(VkBuffer dst, const void *src, VkDeviceSize size) {
-    if (size == 0) return;
+    if (size == 0)
+      return;
     VkBuffer staging = VK_NULL_HANDLE;
     VkDeviceMemory stagingMem = VK_NULL_HANDLE;
     createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -450,8 +491,12 @@ private:
   VkPipeline pipeline_ = VK_NULL_HANDLE;
 
   VkFormat fluidDepthFormat_ = VK_FORMAT_R32_SFLOAT;
-  VkImage fluidDepthImage_ = VK_NULL_HANDLE;   VkDeviceMemory fluidDepthMem_ = VK_NULL_HANDLE;  VkImageView fluidDepthView_ = VK_NULL_HANDLE;
-  VkImage fluidZImage_ = VK_NULL_HANDLE;       VkDeviceMemory fluidZMem_ = VK_NULL_HANDLE;      VkImageView fluidZView_ = VK_NULL_HANDLE; // offscreen depth buffer
+  VkImage fluidDepthImage_ = VK_NULL_HANDLE;
+  VkDeviceMemory fluidDepthMem_ = VK_NULL_HANDLE;
+  VkImageView fluidDepthView_ = VK_NULL_HANDLE;
+  VkImage fluidZImage_ = VK_NULL_HANDLE;
+  VkDeviceMemory fluidZMem_ = VK_NULL_HANDLE;
+  VkImageView fluidZView_ = VK_NULL_HANDLE; // offscreen depth buffer
   VkRenderPass fluidDepthPass_ = VK_NULL_HANDLE;
   VkFramebuffer fluidDepthFB_ = VK_NULL_HANDLE;
   VkSampler fluidSampler_ = VK_NULL_HANDLE;
@@ -468,8 +513,12 @@ private:
   bool imguiInitialized_ = false;
 
   // bilateral blur
-  VkImage blurTempImage_ = VK_NULL_HANDLE;   VkDeviceMemory blurTempMem_ = VK_NULL_HANDLE;   VkImageView blurTempView_ = VK_NULL_HANDLE;
-  VkImage blurSmoothImage_ = VK_NULL_HANDLE; VkDeviceMemory blurSmoothMem_ = VK_NULL_HANDLE; VkImageView blurSmoothView_ = VK_NULL_HANDLE;
+  VkImage blurTempImage_ = VK_NULL_HANDLE;
+  VkDeviceMemory blurTempMem_ = VK_NULL_HANDLE;
+  VkImageView blurTempView_ = VK_NULL_HANDLE;
+  VkImage blurSmoothImage_ = VK_NULL_HANDLE;
+  VkDeviceMemory blurSmoothMem_ = VK_NULL_HANDLE;
+  VkImageView blurSmoothView_ = VK_NULL_HANDLE;
   VkRenderPass blurPass_ = VK_NULL_HANDLE;
   VkFramebuffer blurTempFB_ = VK_NULL_HANDLE;
   VkFramebuffer blurSmoothFB_ = VK_NULL_HANDLE;
@@ -482,27 +531,44 @@ private:
   VkDeviceMemory quadMemory_ = VK_NULL_HANDLE;
 
   uint32_t numParticles_ = 0;
-  uint32_t paddedCount_ = 0; // numParticles rounded up to a power of two
+  uint32_t gridCellCount_ = 0;
+  uint32_t startCapacity_ = 0;
+  float baseDeltaT_ = 0.002f;
 
-  VkBuffer positionsBuf_ = VK_NULL_HANDLE;   VkDeviceMemory positionsMem_ = VK_NULL_HANDLE;
-  VkBuffer velocitiesBuf_ = VK_NULL_HANDLE;  VkDeviceMemory velocitiesMem_ = VK_NULL_HANDLE;
-  VkBuffer predictedBuf_ = VK_NULL_HANDLE;   VkDeviceMemory predictedMem_ = VK_NULL_HANDLE;
-  VkBuffer densitiesBuf_ = VK_NULL_HANDLE;   VkDeviceMemory densitiesMem_ = VK_NULL_HANDLE;
-  VkBuffer viscForceBuf_ = VK_NULL_HANDLE;   VkDeviceMemory viscForceMem_ = VK_NULL_HANDLE;
-  VkBuffer paramsBuf_ = VK_NULL_HANDLE;      VkDeviceMemory paramsMem_ = VK_NULL_HANDLE;      void *paramsMapped_ = nullptr;
-  VkBuffer interactionBuf_ = VK_NULL_HANDLE; VkDeviceMemory interactionMem_ = VK_NULL_HANDLE; void *interactionMapped_ = nullptr;
+  VkBuffer positionsBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory positionsMem_ = VK_NULL_HANDLE;
+  VkBuffer velocitiesBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory velocitiesMem_ = VK_NULL_HANDLE;
+  VkBuffer predictedBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory predictedMem_ = VK_NULL_HANDLE;
+  VkBuffer densitiesBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory densitiesMem_ = VK_NULL_HANDLE;
+  VkBuffer paramsBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory paramsMem_ = VK_NULL_HANDLE;
+  void *paramsMapped_ = nullptr;
+  VkBuffer interactionBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory interactionMem_ = VK_NULL_HANDLE;
+  void *interactionMapped_ = nullptr;
+  InteractionParams pendingInteraction_{};
   // spatial-hash buffers
-  VkBuffer keysBuf_ = VK_NULL_HANDLE;        VkDeviceMemory keysMem_ = VK_NULL_HANDLE;
-  VkBuffer indicesBuf_ = VK_NULL_HANDLE;     VkDeviceMemory indicesMem_ = VK_NULL_HANDLE;
-  VkBuffer startBuf_ = VK_NULL_HANDLE;       VkDeviceMemory startMem_ = VK_NULL_HANDLE;
+  VkBuffer keysBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory keysMem_ = VK_NULL_HANDLE;
+  VkBuffer indicesBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory indicesMem_ = VK_NULL_HANDLE;
+  VkBuffer startBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory startMem_ = VK_NULL_HANDLE;
 
   // sorted-order scratch buffers
-  VkBuffer sortedPosBuf_ = VK_NULL_HANDLE;   VkDeviceMemory sortedPosMem_ = VK_NULL_HANDLE;
-  VkBuffer sortedVelBuf_ = VK_NULL_HANDLE;   VkDeviceMemory sortedVelMem_ = VK_NULL_HANDLE;
-  VkBuffer sortedPredBuf_ = VK_NULL_HANDLE;  VkDeviceMemory sortedPredMem_ = VK_NULL_HANDLE;
+  VkBuffer sortedPosBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory sortedPosMem_ = VK_NULL_HANDLE;
+  VkBuffer sortedVelBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory sortedVelMem_ = VK_NULL_HANDLE;
+  VkBuffer sortedPredBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory sortedPredMem_ = VK_NULL_HANDLE;
 
   VrdxSorter sorter_ = VK_NULL_HANDLE;
-  VkBuffer sortStorageBuf_ = VK_NULL_HANDLE; VkDeviceMemory sortStorageMem_ = VK_NULL_HANDLE;
+  VkBuffer sortStorageBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory sortStorageMem_ = VK_NULL_HANDLE;
 
   VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;
   VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
@@ -510,9 +576,9 @@ private:
 
   VkPipelineLayout computePipelineLayout_ = VK_NULL_HANDLE;
 
-  // 0:external 1:hashKeys 2:reorder 3:copyback 4:startReset 5:startIndices
-  // 6:density 7:pressure 8:viscosity 9:integrate
-  std::array<VkPipeline, 10> computePipelines_{};
+  // 0:external+keys 1:reorder 2:startReset 3:startIndices 4:density
+  // 5:pressure 6:viscosity+integrate
+  std::array<VkPipeline, 7> computePipelines_{};
 
   VkCommandPool commandPool_ = VK_NULL_HANDLE;
   std::array<VkCommandBuffer, kMaxFramesInFlight> commandBuffers_{};
@@ -522,7 +588,8 @@ private:
   uint32_t currentFrame_ = 0;
 
   static void framebufferResizeCallback(GLFWwindow *win, int, int) {
-    auto self = reinterpret_cast<VulkanRenderer *>(glfwGetWindowUserPointer(win));
+    auto self =
+        reinterpret_cast<VulkanRenderer *>(glfwGetWindowUserPointer(win));
     self->framebufferResized_ = true;
   }
 
@@ -550,17 +617,18 @@ private:
     uint32_t glfwExtCount = 0;
     const char **glfwExts = glfwGetRequiredInstanceExtensions(&glfwExtCount);
     std::vector<const char *> extensions(glfwExts, glfwExts + glfwExtCount);
-    
-    // MoltenVK / portability extensions (macOS only)
-    #if VKR_OS_MACOS
+
+// MoltenVK / portability extensions (macOS only)
+#if VKR_OS_MACOS
     extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-    extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
-    #endif
+    extensions.push_back(
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+#endif
 
     VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-    #if VKR_OS_MACOS
+#if VKR_OS_MACOS
     ci.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-    #endif
+#endif
     ci.pApplicationInfo = &app;
     ci.enabledExtensionCount = (uint32_t)extensions.size();
     ci.ppEnabledExtensionNames = extensions.data();
@@ -629,9 +697,9 @@ private:
       queueInfos.push_back(qi);
     }
 
-    std::vector<const char *> deviceExts = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                                            VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
-    #if VKR_OS_MACOS
+    std::vector<const char *> deviceExts = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
+#if VKR_OS_MACOS
     uint32_t extCount = 0;
     vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extCount,
                                          nullptr);
@@ -644,7 +712,7 @@ private:
         break;
       }
     }
-    #endif
+#endif
 
     VkPhysicalDeviceVulkan13Features features13{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
@@ -764,9 +832,9 @@ private:
       ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
       ci.subresourceRange.levelCount = 1;
       ci.subresourceRange.layerCount = 1;
-      vkCheck(vkCreateImageView(device_, &ci, nullptr,
-                                &swapchainImageViews_[i]),
-              "vkCreateImageView(swapchain)");
+      vkCheck(
+          vkCreateImageView(device_, &ci, nullptr, &swapchainImageViews_[i]),
+          "vkCreateImageView(swapchain)");
     }
   }
 
@@ -791,8 +859,7 @@ private:
     depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    VkAttachmentReference colorRef{
-        0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkAttachmentReference depthRef{
         1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
 
@@ -1042,12 +1109,10 @@ private:
 
   void createQuadVertexBuffer() {
     const float quad[] = {
-        -1.f, -1.f, 1.f, -1.f, 1.f, 1.f,
-        -1.f, -1.f, 1.f,  1.f, -1.f, 1.f,
+        -1.f, -1.f, 1.f, -1.f, 1.f, 1.f, -1.f, -1.f, 1.f, 1.f, -1.f, 1.f,
     };
     VkDeviceSize size = sizeof(quad);
-    createBuffer(size,
-                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+    createBuffer(size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  quadBuffer_, quadMemory_);
@@ -1058,7 +1123,6 @@ private:
   }
 
   void createComputeBuffers() {
-    paddedCount_ = numParticles_;
     const VkMemoryPropertyFlags devLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     const VkBufferUsageFlags storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     const VkBufferUsageFlags storageDst =
@@ -1066,15 +1130,17 @@ private:
     VkDeviceSize vec4Size = sizeof(float) * 4 * numParticles_;
     VkDeviceSize fltSize = sizeof(float) * numParticles_;
     VkDeviceSize uintSize = sizeof(uint32_t) * numParticles_;
+    startCapacity_ = numParticles_ * 2u;
+    VkDeviceSize startSize = sizeof(uint32_t) * startCapacity_;
 
     createBuffer(vec4Size, storageDst, devLocal, positionsBuf_, positionsMem_);
-    createBuffer(vec4Size, storageDst, devLocal, velocitiesBuf_, velocitiesMem_);
+    createBuffer(vec4Size, storageDst, devLocal, velocitiesBuf_,
+                 velocitiesMem_);
     createBuffer(vec4Size, storage, devLocal, predictedBuf_, predictedMem_);
     createBuffer(fltSize, storage, devLocal, densitiesBuf_, densitiesMem_);
-    createBuffer(vec4Size, storage, devLocal, viscForceBuf_, viscForceMem_);
     createBuffer(uintSize, storage, devLocal, keysBuf_, keysMem_);
     createBuffer(uintSize, storage, devLocal, indicesBuf_, indicesMem_);
-    createBuffer(uintSize, storage, devLocal, startBuf_, startMem_);
+    createBuffer(startSize, storage, devLocal, startBuf_, startMem_);
 
     createBuffer(vec4Size, storage, devLocal, sortedPosBuf_, sortedPosMem_);
     createBuffer(vec4Size, storage, devLocal, sortedVelBuf_, sortedVelMem_);
@@ -1091,7 +1157,7 @@ private:
                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  interactionBuf_, interactionMem_);
     vkMapMemory(device_, interactionMem_, 0, sizeof(InteractionParams), 0,
-               &interactionMapped_);
+                &interactionMapped_);
   }
 
   void createSorter() {
@@ -1109,29 +1175,25 @@ private:
   }
 
   void createDescriptorSetLayout() {
-    // bindings 0-4 sim, 5 UBO(params), 6-8 spatial hash, 9-11 sorted scratch,
-    // 12 UBO(interaction)
-    std::array<VkDescriptorSetLayoutBinding, 13> b{};
-    for (uint32_t i = 0; i < 13; i++) {
-      b[i].binding = i;
-      b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-      b[i].descriptorCount = 1;
-      b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    constexpr std::array<uint32_t, 12> bindings = {0, 1, 2, 3,  5,  6,
+                                                   7, 8, 9, 10, 11, 12};
+    std::array<VkDescriptorSetLayoutBinding, bindings.size()> layoutBindings{};
+    for (size_t i = 0; i < bindings.size(); ++i) {
+      auto &binding = layoutBindings[i];
+      binding.binding = bindings[i];
+      binding.descriptorType = (bindings[i] == 5 || bindings[i] == 12)
+                                   ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                   : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      binding.descriptorCount = 1;
+      binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+      if (bindings[i] == 0 || bindings[i] == 1)
+        binding.stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
     }
-    // positions (0) and velocities (1) are also read by the vertex shader
-    b[0].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
-    b[1].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
-    // binding 5 is the uniform params block
-    b[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    b[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    // binding 12 is the uniform interaction block
-    b[12].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    b[12].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo ci{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    ci.bindingCount = (uint32_t)b.size();
-    ci.pBindings = b.data();
+    ci.bindingCount = (uint32_t)layoutBindings.size();
+    ci.pBindings = layoutBindings.data();
     vkCheck(vkCreateDescriptorSetLayout(device_, &ci, nullptr,
                                         &descriptorSetLayout_),
             "vkCreateDescriptorSetLayout");
@@ -1139,7 +1201,7 @@ private:
 
   void createDescriptorPoolAndSet() {
     std::array<VkDescriptorPoolSize, 2> sizes{};
-    sizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11};
+    sizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10};
     sizes[1] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2};
     VkDescriptorPoolCreateInfo pi{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -1157,21 +1219,21 @@ private:
     vkCheck(vkAllocateDescriptorSets(device_, &ai, &descriptorSet_),
             "vkAllocateDescriptorSets");
 
-    // binding index -> buffer (indices 5 and 12 are UBOs, handled specially)
-    VkBuffer bufs[13] = {positionsBuf_, velocitiesBuf_, predictedBuf_,
-                         densitiesBuf_, viscForceBuf_,  paramsBuf_,
-                         keysBuf_,      indicesBuf_,     startBuf_,
-                         sortedPosBuf_, sortedVelBuf_,   sortedPredBuf_,
-                         interactionBuf_};
-    std::array<VkDescriptorBufferInfo, 13> infos{};
-    std::array<VkWriteDescriptorSet, 13> writes{};
-    for (uint32_t i = 0; i < 13; i++) {
-      infos[i] = {bufs[i], 0, VK_WHOLE_SIZE};
+    constexpr std::array<uint32_t, 12> bindings = {0, 1, 2, 3,  5,  6,
+                                                   7, 8, 9, 10, 11, 12};
+    std::array<VkBuffer, 12> buffers = {
+        positionsBuf_, velocitiesBuf_, predictedBuf_,  densitiesBuf_,
+        paramsBuf_,    keysBuf_,       indicesBuf_,    startBuf_,
+        sortedPosBuf_, sortedVelBuf_,  sortedPredBuf_, interactionBuf_};
+    std::array<VkDescriptorBufferInfo, 12> infos{};
+    std::array<VkWriteDescriptorSet, 12> writes{};
+    for (size_t i = 0; i < bindings.size(); ++i) {
+      infos[i] = {buffers[i], 0, VK_WHOLE_SIZE};
       writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       writes[i].dstSet = descriptorSet_;
-      writes[i].dstBinding = i;
+      writes[i].dstBinding = bindings[i];
       writes[i].descriptorCount = 1;
-      writes[i].descriptorType = (i == 5 || i == 12)
+      writes[i].descriptorType = (bindings[i] == 5 || bindings[i] == 12)
                                      ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
                                      : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       writes[i].pBufferInfo = &infos[i];
@@ -1205,20 +1267,18 @@ private:
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pl.setLayoutCount = 1;
     pl.pSetLayouts = &descriptorSetLayout_;
-    vkCheck(vkCreatePipelineLayout(device_, &pl, nullptr,
-                                   &computePipelineLayout_),
-            "vkCreatePipelineLayout(compute)");
+    vkCheck(
+        vkCreatePipelineLayout(device_, &pl, nullptr, &computePipelineLayout_),
+        "vkCreatePipelineLayout(compute)");
 
     computePipelines_[0] = createComputePipeline("sph_external.comp.spv");
-    computePipelines_[1] = createComputePipeline("sph_hash_keys.comp.spv");
-    computePipelines_[2] = createComputePipeline("sph_reorder.comp.spv");
-    computePipelines_[3] = createComputePipeline("sph_copyback.comp.spv");
-    computePipelines_[4] = createComputePipeline("sph_start_reset.comp.spv");
-    computePipelines_[5] = createComputePipeline("sph_start_indices.comp.spv");
-    computePipelines_[6] = createComputePipeline("sph_density.comp.spv");
-    computePipelines_[7] = createComputePipeline("sph_pressure.comp.spv");
-    computePipelines_[8] = createComputePipeline("sph_viscosity.comp.spv");
-    computePipelines_[9] = createComputePipeline("sph_integrate.comp.spv");
+    computePipelines_[1] = createComputePipeline("sph_reorder.comp.spv");
+    computePipelines_[2] = createComputePipeline("sph_start_reset.comp.spv");
+    computePipelines_[3] = createComputePipeline("sph_start_indices.comp.spv");
+    computePipelines_[4] = createComputePipeline("sph_density.comp.spv");
+    computePipelines_[5] = createComputePipeline("sph_pressure.comp.spv");
+    computePipelines_[6] =
+        createComputePipeline("sph_viscosity_integrate.comp.spv");
   }
 
   void createImage2D(VkFormat format, VkImageUsageFlags usage,
@@ -1251,18 +1311,21 @@ private:
     vi.subresourceRange.aspectMask = aspect;
     vi.subresourceRange.levelCount = 1;
     vi.subresourceRange.layerCount = 1;
-    vkCheck(vkCreateImageView(device_, &vi, nullptr, &view), "vkCreateImageView");
+    vkCheck(vkCreateImageView(device_, &vi, nullptr, &view),
+            "vkCreateImageView");
   }
 
   void createImGuiDescriptorPool() {
     VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32};
-    VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    VkDescriptorPoolCreateInfo ci{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     ci.maxSets = 32;
     ci.poolSizeCount = 1;
     ci.pPoolSizes = &size;
-    vkCheck(vkCreateDescriptorPool(device_, &ci, nullptr, &imguiDescriptorPool_),
-            "vkCreateDescriptorPool(imgui)");
+    vkCheck(
+        vkCreateDescriptorPool(device_, &ci, nullptr, &imguiDescriptorPool_),
+        "vkCreateDescriptorPool(imgui)");
   }
 
   void createFluidTargets() {
@@ -1344,11 +1407,10 @@ private:
     }
 
     // blur target
-    createImage2D(fluidDepthFormat_,
-                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                      VK_IMAGE_USAGE_SAMPLED_BIT,
-                  VK_IMAGE_ASPECT_COLOR_BIT, blurTempImage_, blurTempMem_,
-                  blurTempView_);
+    createImage2D(
+        fluidDepthFormat_,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT, blurTempImage_, blurTempMem_, blurTempView_);
     createImage2D(fluidDepthFormat_,
                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                       VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -1415,15 +1477,17 @@ private:
     dpl.pSetLayouts = &descriptorSetLayout_;
     dpl.pushConstantRangeCount = 1;
     dpl.pPushConstantRanges = &depthPC;
-    vkCheck(vkCreatePipelineLayout(device_, &dpl, nullptr, &depthPipelineLayout_),
-            "vkCreatePipelineLayout(depth)");
+    vkCheck(
+        vkCreatePipelineLayout(device_, &dpl, nullptr, &depthPipelineLayout_),
+        "vkCreatePipelineLayout(depth)");
 
     VkVertexInputBindingDescription bind{0, sizeof(float) * 2,
                                          VK_VERTEX_INPUT_RATE_VERTEX};
     VkVertexInputAttributeDescription attr{0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
-    depthPipeline_ = buildGraphicsPipeline(
-        "fluid_depth.vert.spv", "fluid_depth.frag.spv", fluidDepthPass_,
-        depthPipelineLayout_, &bind, &attr, /*attrCount*/ 1, /*depthTest*/ true);
+    depthPipeline_ =
+        buildGraphicsPipeline("fluid_depth.vert.spv", "fluid_depth.frag.spv",
+                              fluidDepthPass_, depthPipelineLayout_, &bind,
+                              &attr, /*attrCount*/ 1, /*depthTest*/ true);
 
     VkDescriptorSetLayoutBinding sb{};
     sb.binding = 0;
@@ -1469,8 +1533,9 @@ private:
     bpl.pSetLayouts = &compositeSetLayout_;
     bpl.pushConstantRangeCount = 1;
     bpl.pPushConstantRanges = &blurPC;
-    vkCheck(vkCreatePipelineLayout(device_, &bpl, nullptr, &blurPipelineLayout_),
-            "vkCreatePipelineLayout(blur)");
+    vkCheck(
+        vkCreatePipelineLayout(device_, &bpl, nullptr, &blurPipelineLayout_),
+        "vkCreatePipelineLayout(blur)");
     blurPipeline_ = buildGraphicsPipeline(
         "fullscreen.vert.spv", "fluid_blur.frag.spv", blurPass_,
         blurPipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false);
@@ -1507,11 +1572,12 @@ private:
     writeSampler(compositeSet_, blurSmoothView_);
   }
 
-  VkPipeline buildGraphicsPipeline(const char *vertSpv, const char *fragSpv,
-                                   VkRenderPass pass, VkPipelineLayout layout,
-                                   const VkVertexInputBindingDescription *bind,
-                                   const VkVertexInputAttributeDescription *attr,
-                                   uint32_t attrCount, bool depthTest) {
+  VkPipeline
+  buildGraphicsPipeline(const char *vertSpv, const char *fragSpv,
+                        VkRenderPass pass, VkPipelineLayout layout,
+                        const VkVertexInputBindingDescription *bind,
+                        const VkVertexInputAttributeDescription *attr,
+                        uint32_t attrCount, bool depthTest) {
     VkShaderModule vert =
         createShaderModule(readFile(std::string(SHADER_DIR) + "/" + vertSpv));
     VkShaderModule frag =
@@ -1630,9 +1696,7 @@ private:
       vkCheck(vkCreateFence(device_, &fi, nullptr, &inFlightFences_[i]),
               "vkCreateFence");
     }
-    // one render-finished semaphore per swapchain image, so a present that is
-    // still consuming semaphore K can never be re-signaled by a later frame
-    // that happens to reuse image K while K's present is still pending.
+
     renderFinishedSemaphores_.resize(swapchainImages_.size());
     for (auto &sem : renderFinishedSemaphores_)
       vkCheck(vkCreateSemaphore(device_, &si, nullptr, &sem),
@@ -1642,17 +1706,14 @@ private:
   // Barrier so one compute pass's SSBO writes are visible to the next.
   void ssboBarrier(VkCommandBuffer cmd) {
     VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-    b.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b, 0,
                          nullptr, 0, nullptr);
   }
 
-  // Explicit barrier between two render passes: waits for a color attachment
-  // write to finish before the next pass's fragment shader samples it. Needed
-  // because two independent render passes are NOT synchronized against each
-  // other just by each having their own VK_SUBPASS_EXTERNAL dependency.
+  // Explicit barrier between two render passes
   void colorToSampledBarrier(VkCommandBuffer cmd, VkImage image) {
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -1668,10 +1729,12 @@ private:
                          0, nullptr, 1, &b);
   }
 
-  void dispatchStage(VkCommandBuffer cmd, VkPipeline pipeline, uint32_t groups) {
+  void dispatchStage(VkCommandBuffer cmd, VkPipeline pipeline, uint32_t groups,
+                     bool barrierAfter = true) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdDispatch(cmd, groups, 1, 1);
-    ssboBarrier(cmd);
+    if (barrierAfter)
+      ssboBarrier(cmd);
   }
 
   void radixSort(VkCommandBuffer cmd) {
@@ -1690,38 +1753,40 @@ private:
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkCheck(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer");
 
-    // compute stage
-    // advance the simulation by substeps, each of which runs the full compute
     const uint32_t groupsN = (numParticles_ + 255u) / 256u;
+    const uint32_t groupsGrid = (gridCellCount_ + 255u) / 256u;
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             computePipelineLayout_, 0, 1, &descriptorSet_, 0,
                             nullptr);
-    for (int s = 0; s < substeps; s++) {
-      dispatchStage(cmd, computePipelines_[0], groupsN); // external forces
-      dispatchStage(cmd, computePipelines_[1], groupsN); // build cell keys
-      radixSort(cmd);                                     // sort keys+indices
+    for (int s = 0; s < substeps; ++s) {
+      dispatchStage(cmd, computePipelines_[0],
+                    groupsN); // external + exact keys
+      radixSort(cmd);         // sort keys + indices
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                               computePipelineLayout_, 0, 1, &descriptorSet_, 0,
                               nullptr);
-      dispatchStage(cmd, computePipelines_[2], groupsN); // gather into sorted
-      dispatchStage(cmd, computePipelines_[3], groupsN); // copy back (now sorted)
-      dispatchStage(cmd, computePipelines_[4], groupsN); // reset startIndices
-      dispatchStage(cmd, computePipelines_[5], groupsN); // fill startIndices
-      dispatchStage(cmd, computePipelines_[6], groupsN); // density
-      dispatchStage(cmd, computePipelines_[7], groupsN); // pressure
-      dispatchStage(cmd, computePipelines_[8], groupsN); // viscosity force
-      dispatchStage(cmd, computePipelines_[9], groupsN); // integrate + collide
+      dispatchStage(cmd, computePipelines_[1], groupsN); // gather sorted state
+      dispatchStage(cmd, computePipelines_[2], groupsGrid); // reset exact grid
+      dispatchStage(cmd, computePipelines_[3], groupsN);    // bucket starts
+      dispatchStage(cmd, computePipelines_[4], groupsN);    // density
+      dispatchStage(cmd, computePipelines_[5], groupsN);    // pressure
+      dispatchStage(cmd, computePipelines_[6], groupsN,
+                    s + 1 < substeps); // viscosity + integrate
     }
 
     VkMemoryBarrier toVertex{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     toVertex.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     toVertex.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &toVertex, 0,
-                         nullptr, 0, nullptr);
+                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &toVertex,
+                         0, nullptr, 0, nullptr);
 
-    VkViewport viewport{0.0f, 0.0f, (float)swapchainExtent_.width,
-                        (float)swapchainExtent_.height, 0.0f, 1.0f};
+    VkViewport viewport{0.0f,
+                        0.0f,
+                        (float)swapchainExtent_.width,
+                        (float)swapchainExtent_.height,
+                        0.0f,
+                        1.0f};
     VkRect2D scissor{{0, 0}, swapchainExtent_};
 
     // Render spheres to depth target
@@ -1740,7 +1805,8 @@ private:
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     vkCmdPushConstants(cmd, depthPipelineLayout_,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       VK_SHADER_STAGE_VERTEX_BIT |
+                           VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(DepthPush), &dp);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             depthPipelineLayout_, 0, 1, &descriptorSet_, 0,
@@ -1766,8 +1832,9 @@ private:
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline_);
       vkCmdSetViewport(cmd, 0, 1, &viewport);
       vkCmdSetScissor(cmd, 0, 1, &scissor);
-      float bpc[4] = {dx, dy, fluidSettings_.depthFalloff,
-                      fluidSettings_.blurRadius}; // dir, depthFalloff, radius(px)
+      float bpc[4] = {
+          dx, dy, fluidSettings_.depthFalloff,
+          fluidSettings_.blurRadius}; // dir, depthFalloff, radius(px)
       vkCmdPushConstants(cmd, blurPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
                          0, sizeof(bpc), bpc);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1777,7 +1844,7 @@ private:
     };
     float invW = 1.0f / (float)swapchainExtent_.width;
     float invH = 1.0f / (float)swapchainExtent_.height;
-    blurPass(blurTempFB_, blurSetH_, invW, 0.0f);   // horizontal
+    blurPass(blurTempFB_, blurSetH_, invW, 0.0f); // horizontal
     colorToSampledBarrier(cmd, blurTempImage_);
     blurPass(blurSmoothFB_, blurSetV_, 0.0f, invH); // vertical
     colorToSampledBarrier(cmd, blurSmoothImage_);
@@ -1809,28 +1876,76 @@ private:
   }
 
   void destroyFluidSizedTargets() {
-    if (fluidDepthFB_) { vkDestroyFramebuffer(device_, fluidDepthFB_, nullptr); fluidDepthFB_ = VK_NULL_HANDLE; }
-    if (fluidDepthView_) { vkDestroyImageView(device_, fluidDepthView_, nullptr); fluidDepthView_ = VK_NULL_HANDLE; }
-    if (fluidDepthImage_) { vkDestroyImage(device_, fluidDepthImage_, nullptr); fluidDepthImage_ = VK_NULL_HANDLE; }
-    if (fluidDepthMem_) { vkFreeMemory(device_, fluidDepthMem_, nullptr); fluidDepthMem_ = VK_NULL_HANDLE; }
-    if (fluidZView_) { vkDestroyImageView(device_, fluidZView_, nullptr); fluidZView_ = VK_NULL_HANDLE; }
-    if (fluidZImage_) { vkDestroyImage(device_, fluidZImage_, nullptr); fluidZImage_ = VK_NULL_HANDLE; }
-    if (fluidZMem_) { vkFreeMemory(device_, fluidZMem_, nullptr); fluidZMem_ = VK_NULL_HANDLE; }
-    if (blurTempFB_) { vkDestroyFramebuffer(device_, blurTempFB_, nullptr); blurTempFB_ = VK_NULL_HANDLE; }
-    if (blurSmoothFB_) { vkDestroyFramebuffer(device_, blurSmoothFB_, nullptr); blurSmoothFB_ = VK_NULL_HANDLE; }
-    if (blurTempView_) { vkDestroyImageView(device_, blurTempView_, nullptr); blurTempView_ = VK_NULL_HANDLE; }
-    if (blurTempImage_) { vkDestroyImage(device_, blurTempImage_, nullptr); blurTempImage_ = VK_NULL_HANDLE; }
-    if (blurTempMem_) { vkFreeMemory(device_, blurTempMem_, nullptr); blurTempMem_ = VK_NULL_HANDLE; }
-    if (blurSmoothView_) { vkDestroyImageView(device_, blurSmoothView_, nullptr); blurSmoothView_ = VK_NULL_HANDLE; }
-    if (blurSmoothImage_) { vkDestroyImage(device_, blurSmoothImage_, nullptr); blurSmoothImage_ = VK_NULL_HANDLE; }
-    if (blurSmoothMem_) { vkFreeMemory(device_, blurSmoothMem_, nullptr); blurSmoothMem_ = VK_NULL_HANDLE; }
+    if (fluidDepthFB_) {
+      vkDestroyFramebuffer(device_, fluidDepthFB_, nullptr);
+      fluidDepthFB_ = VK_NULL_HANDLE;
+    }
+    if (fluidDepthView_) {
+      vkDestroyImageView(device_, fluidDepthView_, nullptr);
+      fluidDepthView_ = VK_NULL_HANDLE;
+    }
+    if (fluidDepthImage_) {
+      vkDestroyImage(device_, fluidDepthImage_, nullptr);
+      fluidDepthImage_ = VK_NULL_HANDLE;
+    }
+    if (fluidDepthMem_) {
+      vkFreeMemory(device_, fluidDepthMem_, nullptr);
+      fluidDepthMem_ = VK_NULL_HANDLE;
+    }
+    if (fluidZView_) {
+      vkDestroyImageView(device_, fluidZView_, nullptr);
+      fluidZView_ = VK_NULL_HANDLE;
+    }
+    if (fluidZImage_) {
+      vkDestroyImage(device_, fluidZImage_, nullptr);
+      fluidZImage_ = VK_NULL_HANDLE;
+    }
+    if (fluidZMem_) {
+      vkFreeMemory(device_, fluidZMem_, nullptr);
+      fluidZMem_ = VK_NULL_HANDLE;
+    }
+    if (blurTempFB_) {
+      vkDestroyFramebuffer(device_, blurTempFB_, nullptr);
+      blurTempFB_ = VK_NULL_HANDLE;
+    }
+    if (blurSmoothFB_) {
+      vkDestroyFramebuffer(device_, blurSmoothFB_, nullptr);
+      blurSmoothFB_ = VK_NULL_HANDLE;
+    }
+    if (blurTempView_) {
+      vkDestroyImageView(device_, blurTempView_, nullptr);
+      blurTempView_ = VK_NULL_HANDLE;
+    }
+    if (blurTempImage_) {
+      vkDestroyImage(device_, blurTempImage_, nullptr);
+      blurTempImage_ = VK_NULL_HANDLE;
+    }
+    if (blurTempMem_) {
+      vkFreeMemory(device_, blurTempMem_, nullptr);
+      blurTempMem_ = VK_NULL_HANDLE;
+    }
+    if (blurSmoothView_) {
+      vkDestroyImageView(device_, blurSmoothView_, nullptr);
+      blurSmoothView_ = VK_NULL_HANDLE;
+    }
+    if (blurSmoothImage_) {
+      vkDestroyImage(device_, blurSmoothImage_, nullptr);
+      blurSmoothImage_ = VK_NULL_HANDLE;
+    }
+    if (blurSmoothMem_) {
+      vkFreeMemory(device_, blurSmoothMem_, nullptr);
+      blurSmoothMem_ = VK_NULL_HANDLE;
+    }
   }
 
   void cleanupSwapchain() {
     destroyFluidSizedTargets();
-    if (depthView_) vkDestroyImageView(device_, depthView_, nullptr);
-    if (depthImage_) vkDestroyImage(device_, depthImage_, nullptr);
-    if (depthMemory_) vkFreeMemory(device_, depthMemory_, nullptr);
+    if (depthView_)
+      vkDestroyImageView(device_, depthView_, nullptr);
+    if (depthImage_)
+      vkDestroyImage(device_, depthImage_, nullptr);
+    if (depthMemory_)
+      vkFreeMemory(device_, depthMemory_, nullptr);
     depthView_ = VK_NULL_HANDLE;
     depthImage_ = VK_NULL_HANDLE;
     depthMemory_ = VK_NULL_HANDLE;
@@ -1855,7 +1970,8 @@ private:
     }
     vkDeviceWaitIdle(device_);
     for (auto sem : renderFinishedSemaphores_)
-      if (sem) vkDestroySemaphore(device_, sem, nullptr);
+      if (sem)
+        vkDestroySemaphore(device_, sem, nullptr);
     renderFinishedSemaphores_.clear();
     cleanupSwapchain();
     createSwapchain();

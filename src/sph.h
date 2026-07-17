@@ -13,19 +13,21 @@ namespace sph {
 constexpr float PI = 3.14159265358979f;
 
 // integration
-constexpr float deltaT = 0.002f;
+constexpr int referenceParticleCount = 75000;
+constexpr int maxParticles = 300000;
+constexpr int numParticles = maxParticles;
+constexpr float particleScale = 0.625f;
+constexpr float deltaT = 0.002f * particleScale;
 constexpr float3 gravity = float3(0.0f, -9.8f, 0.0f);
-constexpr int numParticles = 75000;
 
-// SPH parameters
-constexpr float smoothingRadius = 0.12f;     // kernel support radius
-constexpr float particleMass = 1.0f;         // mass used for density accumulation
+constexpr float smoothingRadius = 0.12f * particleScale;
+constexpr float particleMass = 0.25f;
 constexpr float collisionDamping = 0.95f;    // velocity kept on a wall bounce
 constexpr float3 boundsSize = float3(8.77f, 2.92f, 2.92f); // simulation box extents
-constexpr float targetDensity = 2315.0f;     // rest density the fluid relaxes to (75k particles, spacing ~0.076)
-constexpr float pressureMultiplier = 16.0f;  // stiffness (acceleration-matched to the finer kernel)
-constexpr float viscosityStrength = 0.001f;  // neighbour velocity averaging
-constexpr int simIterationsPerFrame = 6;     // physics substeps per rendered frame
+constexpr float targetDensity = 2315.0f;
+constexpr float pressureMultiplier = 16.0f;  // stiffness
+constexpr float viscosityStrength = 0.001f;
+constexpr int simIterationsPerFrame = 1;
 
 constexpr float Epsilon = 5e-5f;
 

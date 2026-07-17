@@ -1,11 +1,9 @@
 #version 450
 layout(local_size_x = 256) in;
 
-layout(std430, binding = 0) buffer Positions      { vec4 positions[];      };
-layout(std430, binding = 1) buffer Velocities     { vec4 velocities[];     };
-layout(std430, binding = 2) buffer Predicted      { vec4 predicted[];      };
-layout(std430, binding = 3) buffer Densities      { float densities[];     };
-layout(std430, binding = 4) buffer ViscForces     { vec4 viscForces[];     };
+layout(std430, binding = 0) readonly buffer Positions { vec4 positions[]; };
+layout(std430, binding = 1) readonly buffer Velocities { vec4 velocities[]; };
+layout(std430, binding = 2) readonly buffer Predicted { vec4 predicted[]; };
 layout(std140, binding = 5) uniform Params {
   vec4 gravity;
   vec4 boundsSize;
@@ -19,22 +17,20 @@ layout(std140, binding = 5) uniform Params {
   float spikyPow2Scale;
   float spikyPow2GradScale;
   float poly6Scale;
-  uint  numParticles;
+  uint numParticles;
   float epsilon;
-  uint  paddedCount;
+  uvec4 grid;
 } P;
-layout(std430, binding = 6) buffer SpatialKeys    { uint spatialKeys[];    };
-layout(std430, binding = 7) buffer SpatialIndices { uint spatialIndices[]; };
-layout(std430, binding = 8) buffer StartIndices   { uint startIndices[];   };
-layout(std430, binding = 9)  buffer SortedPos  { vec4 sortedPos[];  };
-layout(std430, binding = 10) buffer SortedVel  { vec4 sortedVel[];  };
+layout(std430, binding = 7) readonly buffer SpatialIndices { uint spatialIndices[]; };
+layout(std430, binding = 9) buffer SortedPos { vec4 sortedPos[]; };
+layout(std430, binding = 10) buffer SortedVel { vec4 sortedVel[]; };
 layout(std430, binding = 11) buffer SortedPred { vec4 sortedPred[]; };
 
 void main() {
   uint e = gl_GlobalInvocationID.x;
   if (e >= P.numParticles) return;
   uint src = spatialIndices[e];
-  sortedPos[e]  = positions[src];
-  sortedVel[e]  = velocities[src];
+  sortedPos[e] = positions[src];
+  sortedVel[e] = velocities[src];
   sortedPred[e] = predicted[src];
 }
