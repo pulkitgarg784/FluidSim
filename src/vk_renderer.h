@@ -1681,7 +1681,7 @@ private:
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline_);
       vkCmdSetViewport(cmd, 0, 1, &viewport);
       vkCmdSetScissor(cmd, 0, 1, &scissor);
-      float bpc[4] = {dx, dy, 0.2f, 19.0f}; // dir, depthFalloff, radius(px)
+      float bpc[4] = {dx, dy, 50.0f, 8.0f}; // dir, depthFalloff, radius(px)
       vkCmdPushConstants(cmd, blurPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
                          0, sizeof(bpc), bpc);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
