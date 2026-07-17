@@ -13,6 +13,20 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 add_subdirectory(external/glfw)
 
+# Dear ImGui v1.91.9b, vendored at external/imgui.
+set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/imgui)
+add_library(imgui STATIC
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp)
+target_include_directories(imgui PUBLIC
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends)
+target_link_libraries(imgui PUBLIC Vulkan::Vulkan glfw)
+
 # Shader compilation
 find_program(GLSLC glslc HINTS
     $ENV{VULKAN_SDK}/bin
@@ -69,4 +83,4 @@ target_include_directories(CS488 PRIVATE
 target_compile_definitions(CS488 PRIVATE
     SHADER_DIR="${SHADER_OUT_DIR}")
 
-target_link_libraries(CS488 PRIVATE Vulkan::Vulkan glfw)
+target_link_libraries(CS488 PRIVATE Vulkan::Vulkan imgui)

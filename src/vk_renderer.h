@@ -4,6 +4,10 @@
 #include <GLFW/glfw3.h>
 #include <vulkan/vulkan.h>
 
+#include <imgui.h>
+#include <backends/imgui_impl_glfw.h>
+#include <backends/imgui_impl_vulkan.h>
+
 #include <array>
 #include <cstring>
 #include <fstream>
@@ -88,6 +92,11 @@ struct DepthPush {
   float4 params; // x = particle radius
 };
 
+struct FluidRenderSettings {
+  float blurRadius = 8.0f;
+  float depthFalloff = 50.0f;
+};
+
 inline void vkCheck(VkResult r, const char *what) {
   if (r != VK_SUCCESS) {
     throw std::runtime_error(std::string("Vulkan error in ") + what + ": " +
@@ -131,6 +140,56 @@ public:
   void pollEvents() const { glfwPollEvents(); }
   void waitIdle() const { vkDeviceWaitIdle(device_); }
 
+  void initImGui() {
+    if (imguiInitialized_)
+      return;
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    if (!ImGui_ImplGlfw_InitForVulkan(window_, true))
+      throw std::runtime_error("Failed to initialize ImGui GLFW backend");
+
+    createImGuiDescriptorPool();
+    ImGui_ImplVulkan_InitInfo info{};
+    info.ApiVersion = VK_API_VERSION_1_4;
+    info.Instance = instance_;
+    info.PhysicalDevice = physicalDevice_;
+    info.Device = device_;
+    info.QueueFamily = graphicsFamily_;
+    info.Queue = graphicsQueue_;
+    info.DescriptorPool = imguiDescriptorPool_;
+    info.RenderPass = renderPass_;
+    info.MinImageCount = (uint32_t)swapchainImages_.size();
+    info.ImageCount = (uint32_t)swapchainImages_.size();
+    info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    info.CheckVkResultFn = [](VkResult result) {
+      if (result != VK_SUCCESS)
+        std::cerr << "ImGui Vulkan error: " << static_cast<int>(result) << '\n';
+    };
+    if (!ImGui_ImplVulkan_Init(&info))
+      throw std::runtime_error("Failed to initialize ImGui Vulkan backend");
+    imguiInitialized_ = true;
+  }
+
+  void beginImGuiFrame() {
+    if (!imguiInitialized_)
+      return;
+
+    ImGui_ImplVulkan_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    ImGui::Begin("Fluid surface controls");
+    ImGui::TextUnformatted("Screen-space reconstruction");
+    ImGui::SliderFloat("Blur radius (px)", &fluidSettings_.blurRadius,
+                       0.0f, 20.0f, "%.1f");
+    ImGui::SliderFloat("Depth falloff", &fluidSettings_.depthFalloff,
+                       0.1f, 250.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+    ImGui::TextUnformatted("Click and drag outside this panel to orbit.");
+    ImGui::End();
+  }
+
   // Write the SPH parameter block to UBO
   void setParams(SphParams params) {
     params.paddedCount = paddedCount_;
@@ -167,6 +226,8 @@ public:
         device_, swapchain_, UINT64_MAX,
         imageAvailableSemaphores_[currentFrame_], VK_NULL_HANDLE, &imageIndex);
     if (acquire == VK_ERROR_OUT_OF_DATE_KHR) {
+      if (imguiInitialized_)
+        ImGui::EndFrame();
       recreateSwapchain();
       return;
     } else if (acquire != VK_SUCCESS && acquire != VK_SUBOPTIMAL_KHR) {
@@ -181,6 +242,9 @@ public:
     dp.camRight = float4(camRight, 0.0f);
     dp.camUp = float4(camUp, 0.0f);
     dp.params = float4(radius, 0.0f, 0.0f, 0.0f);
+
+    if (imguiInitialized_)
+      ImGui::Render();
 
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
     vkResetCommandBuffer(cmd, 0);
@@ -225,6 +289,18 @@ public:
     if (device_ == VK_NULL_HANDLE)
       return;
     vkDeviceWaitIdle(device_);
+
+    if (imguiInitialized_) {
+      ImGui_ImplVulkan_Shutdown();
+      ImGui_ImplGlfw_Shutdown();
+      ImGui::DestroyContext();
+      imguiInitialized_ = false;
+    }
+    if (imguiDescriptorPool_) {
+      vkDestroyDescriptorPool(device_, imguiDescriptorPool_, nullptr);
+      imguiDescriptorPool_ = VK_NULL_HANDLE;
+    }
+
     cleanupSwapchain();
 
     for (VkPipeline p : computePipelines_)
@@ -386,6 +462,10 @@ private:
   VkDescriptorSet compositeSet_ = VK_NULL_HANDLE;
   VkPipelineLayout compositePipelineLayout_ = VK_NULL_HANDLE;
   VkPipeline compositePipeline_ = VK_NULL_HANDLE;
+
+  FluidRenderSettings fluidSettings_{};
+  VkDescriptorPool imguiDescriptorPool_ = VK_NULL_HANDLE;
+  bool imguiInitialized_ = false;
 
   // bilateral blur
   VkImage blurTempImage_ = VK_NULL_HANDLE;   VkDeviceMemory blurTempMem_ = VK_NULL_HANDLE;   VkImageView blurTempView_ = VK_NULL_HANDLE;
@@ -1174,6 +1254,17 @@ private:
     vkCheck(vkCreateImageView(device_, &vi, nullptr, &view), "vkCreateImageView");
   }
 
+  void createImGuiDescriptorPool() {
+    VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32};
+    VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    ci.maxSets = 32;
+    ci.poolSizeCount = 1;
+    ci.pPoolSizes = &size;
+    vkCheck(vkCreateDescriptorPool(device_, &ci, nullptr, &imguiDescriptorPool_),
+            "vkCreateDescriptorPool(imgui)");
+  }
+
   void createFluidTargets() {
     createImage2D(fluidDepthFormat_,
                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
@@ -1384,16 +1475,10 @@ private:
         "fullscreen.vert.spv", "fluid_blur.frag.spv", blurPass_,
         blurPipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false);
 
-    VkPushConstantRange compPC{};
-    compPC.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    compPC.offset = 0;
-    compPC.size = sizeof(float) * 4;
     VkPipelineLayoutCreateInfo cpl{
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     cpl.setLayoutCount = 1;
     cpl.pSetLayouts = &compositeSetLayout_;
-    cpl.pushConstantRangeCount = 1;
-    cpl.pPushConstantRanges = &compPC;
     vkCheck(vkCreatePipelineLayout(device_, &cpl, nullptr,
                                    &compositePipelineLayout_),
             "vkCreatePipelineLayout(composite)");
@@ -1681,7 +1766,8 @@ private:
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline_);
       vkCmdSetViewport(cmd, 0, 1, &viewport);
       vkCmdSetScissor(cmd, 0, 1, &scissor);
-      float bpc[4] = {dx, dy, 50.0f, 8.0f}; // dir, depthFalloff, radius(px)
+      float bpc[4] = {dx, dy, fluidSettings_.depthFalloff,
+                      fluidSettings_.blurRadius}; // dir, depthFalloff, radius(px)
       vkCmdPushConstants(cmd, blurPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
                          0, sizeof(bpc), bpc);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1711,18 +1797,12 @@ private:
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compositePipeline_);
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
-    // reconstruct camera params from the projection matrix for normal recovery
-    float fproj = -dp.proj[1].y;            // proj[1][1] = -1/tan(fovy/2)
-    float tanHalf = 1.0f / fproj;
-    float aspect = fproj / dp.proj[0].x;    // proj[0][0] = f/aspect
-    float compPC[4] = {1.0f / (float)swapchainExtent_.width,
-                       1.0f / (float)swapchainExtent_.height, tanHalf, aspect};
-    vkCmdPushConstants(cmd, compositePipelineLayout_,
-                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(compPC), compPC);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             compositePipelineLayout_, 0, 1, &compositeSet_, 0,
                             nullptr);
     vkCmdDraw(cmd, 3, 1, 0, 0); // fullscreen triangle
+    if (imguiInitialized_)
+      ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
     vkCmdEndRenderPass(cmd);
 
     vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
@@ -1784,6 +1864,8 @@ private:
     createFramebuffers();
     createFluidTargets();
     updateFluidDescriptors();
+    if (imguiInitialized_)
+      ImGui_ImplVulkan_SetMinImageCount((uint32_t)swapchainImages_.size());
     // swapchain image count may have changed; rebuild the per-image semaphores
     VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     renderFinishedSemaphores_.resize(swapchainImages_.size());

@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <vector>
 
+#include <imgui.h>
+
 #include "linalg.h"
 #include "sph.h"
 #include "vk_renderer.h"
@@ -30,9 +32,13 @@ static double m_mouseY = 0.0;
 static void keyFunc(GLFWwindow *window, int key, int, int action, int) {
   if (action == GLFW_PRESS && key == GLFW_KEY_ESCAPE)
     glfwSetWindowShouldClose(window, GLFW_TRUE);
+  if (ImGui::GetIO().WantCaptureKeyboard)
+    return;
 }
 
 static void processKeyboard(GLFWwindow *w, float dt) {
+  if (ImGui::GetIO().WantCaptureKeyboard)
+    return;
   const float d = moveSpeed * dt;
   auto down = [&](int k) { return glfwGetKey(w, k) == GLFW_PRESS; };
   float3 move = float3(0.0f);
@@ -56,6 +62,14 @@ static void processKeyboard(GLFWwindow *w, float dt) {
 }
 
 static void mouseButtonFunc(GLFWwindow *window, int button, int action, int) {
+  if (ImGui::GetIO().WantCaptureMouse) {
+    if (button == GLFW_MOUSE_BUTTON_LEFT)
+      mouseLeftPressed = false;
+    if (button == GLFW_MOUSE_BUTTON_RIGHT)
+      mouseRightPressed = false;
+    return;
+  }
+
   const bool shiftHeld = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
                         glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
   if (button == GLFW_MOUSE_BUTTON_LEFT) {
@@ -71,6 +85,11 @@ static void mouseButtonFunc(GLFWwindow *window, int button, int action, int) {
 }
 
 static void cursorPosFunc(GLFWwindow *, double mouse_x, double mouse_y) {
+  if (ImGui::GetIO().WantCaptureMouse) {
+    m_mouseX = mouse_x;
+    m_mouseY = mouse_y;
+    return;
+  }
   if (mouseLeftPressed) {
     const float xfact = -ANGFACT * float(mouse_y - m_mouseY);
     const float yfact = -ANGFACT * float(mouse_x - m_mouseX);
@@ -151,6 +170,12 @@ int main() {
   glfwSetKeyCallback(win, keyFunc);
   glfwSetMouseButtonCallback(win, mouseButtonFunc);
   glfwSetCursorPosCallback(win, cursorPosFunc);
+  try {
+    renderer.initImGui();
+  } catch (const std::exception &e) {
+    renderer.cleanup();
+    return 1;
+  }
 
   // Push SPH parameters
   vkr::SphParams params{};
@@ -194,6 +219,7 @@ int main() {
   try {
     while (!renderer.shouldClose()) {
       renderer.pollEvents();
+      renderer.beginImGuiFrame();
 
       const double now = glfwGetTime();
       float dt = float(now - lastTime);
@@ -209,7 +235,16 @@ int main() {
 
       const float3 camUp = cross(globalRight, globalViewDir);
 
-      const float aspect = float(width) / float(height);
+      int windowWidth = 0, windowHeight = 0;
+      int framebufferWidth = 0, framebufferHeight = 0;
+      glfwGetWindowSize(win, &windowWidth, &windowHeight);
+      glfwGetFramebufferSize(win, &framebufferWidth, &framebufferHeight);
+      windowWidth = std::max(windowWidth, 1);
+      windowHeight = std::max(windowHeight, 1);
+      framebufferWidth = std::max(framebufferWidth, 1);
+      framebufferHeight = std::max(framebufferHeight, 1);
+      const float aspect =
+          float(framebufferWidth) / float(framebufferHeight);
       const float4x4 proj = perspectiveVK(45.0f, aspect, 0.01f, 100.0f);
       const float4x4 view = lookAt(globalEye, globalLookat, globalUp);
       const float4x4 viewProj = mul(proj, view);
@@ -221,8 +256,8 @@ int main() {
       float interactionStrengthSigned = 0.0f;
       float3 interactionPoint = float3(0.0f);
       if (shiftHeld && (mouseLeftPressed || mouseRightPressed)) {
-        float3 rayDir = mouseRayDirection(m_mouseX, m_mouseY, width, height,
-                                          45.0f, aspect);
+        float3 rayDir = mouseRayDirection(m_mouseX, m_mouseY, windowWidth,
+                                          windowHeight, 45.0f, aspect);
         float3 planeNormal = -globalViewDir; // faces the camera
         float3 planePoint = float3(0.0f);    // box centre
         float denom = dot(rayDir, planeNormal);
