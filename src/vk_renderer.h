@@ -9,6 +9,8 @@
 #include <imgui.h>
 
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -93,6 +95,12 @@ struct DepthPush {
   float4 params; // x = particle radius
 };
 
+struct WaterPush {
+  float4 camRight;
+  float4 camUp;
+  float4 camForward;
+};
+
 struct FluidRenderSettings {
   float blurRadius = 8.0f;
   float depthFalloff = 50.0f;
@@ -124,6 +132,7 @@ public:
     createImageViews();
     createRenderPass();
     createDepthResources();
+    createSceneTargets();
     createFramebuffers();
     createComputeBuffers();
     createSorter();
@@ -132,6 +141,7 @@ public:
     createGraphicsPipeline();
     createComputePipelines();
     createQuadVertexBuffer();
+    createEnvironmentTexture();
     createFluidTargets();
     createFluidPipelines();
     createCommandPoolAndBuffers();
@@ -232,8 +242,8 @@ public:
 
   // Advance the simulation `substeps` times on the GPU, then draw one frame.
   void drawFrame(const float4x4 &view, const float4x4 &proj,
-                 const float3 &camRight, const float3 &camUp, float radius,
-                 int substeps) {
+                 const float3 &camRight, const float3 &camUp,
+                 const float3 &camForward, float radius, int substeps) {
     vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE,
                     UINT64_MAX);
 
@@ -265,12 +275,17 @@ public:
     dp.camUp = float4(camUp, 0.0f);
     dp.params = float4(radius, 0.0f, 0.0f, 0.0f);
 
+    WaterPush wp{};
+    wp.camRight = float4(camRight, 0.0f);
+    wp.camUp = float4(camUp, 0.0f);
+    wp.camForward = float4(camForward, 0.0f);
+
     if (imguiInitialized_)
       ImGui::Render();
 
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
     vkResetCommandBuffer(cmd, 0);
-    recordCommandBuffer(cmd, imageIndex, dp, substeps);
+    recordCommandBuffer(cmd, imageIndex, dp, wp, substeps);
 
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     VkSemaphore waitSemaphores[] = {imageAvailableSemaphores_[currentFrame_]};
@@ -337,6 +352,8 @@ public:
     // fluid rendering
     if (compositePipeline_)
       vkDestroyPipeline(device_, compositePipeline_, nullptr);
+    if (backgroundPipeline_)
+      vkDestroyPipeline(device_, backgroundPipeline_, nullptr);
     if (compositePipelineLayout_)
       vkDestroyPipelineLayout(device_, compositePipelineLayout_, nullptr);
     if (blurPipeline_)
@@ -357,6 +374,18 @@ public:
       vkDestroySampler(device_, fluidSampler_, nullptr);
     if (fluidDepthPass_)
       vkDestroyRenderPass(device_, fluidDepthPass_, nullptr);
+    if (sceneSampler_)
+      vkDestroySampler(device_, sceneSampler_, nullptr);
+    if (envSampler_)
+      vkDestroySampler(device_, envSampler_, nullptr);
+    if (environmentView_)
+      vkDestroyImageView(device_, environmentView_, nullptr);
+    if (environmentImage_)
+      vkDestroyImage(device_, environmentImage_, nullptr);
+    if (environmentMem_)
+      vkFreeMemory(device_, environmentMem_, nullptr);
+    if (scenePass_)
+      vkDestroyRenderPass(device_, scenePass_, nullptr);
 
     if (renderPass_)
       vkDestroyRenderPass(device_, renderPass_, nullptr);
@@ -491,21 +520,33 @@ private:
   VkPipeline pipeline_ = VK_NULL_HANDLE;
 
   VkFormat fluidDepthFormat_ = VK_FORMAT_R32_SFLOAT;
+  VkFormat sceneColorFormat_ = VK_FORMAT_UNDEFINED;
   VkImage fluidDepthImage_ = VK_NULL_HANDLE;
   VkDeviceMemory fluidDepthMem_ = VK_NULL_HANDLE;
   VkImageView fluidDepthView_ = VK_NULL_HANDLE;
   VkImage fluidZImage_ = VK_NULL_HANDLE;
   VkDeviceMemory fluidZMem_ = VK_NULL_HANDLE;
   VkImageView fluidZView_ = VK_NULL_HANDLE; // offscreen depth buffer
+  VkImage sceneColorImage_ = VK_NULL_HANDLE;
+  VkDeviceMemory sceneColorMem_ = VK_NULL_HANDLE;
+  VkImageView sceneColorView_ = VK_NULL_HANDLE;
+  VkRenderPass scenePass_ = VK_NULL_HANDLE;
+  VkFramebuffer sceneFB_ = VK_NULL_HANDLE;
   VkRenderPass fluidDepthPass_ = VK_NULL_HANDLE;
   VkFramebuffer fluidDepthFB_ = VK_NULL_HANDLE;
   VkSampler fluidSampler_ = VK_NULL_HANDLE;
+  VkSampler sceneSampler_ = VK_NULL_HANDLE;
+  VkImage environmentImage_ = VK_NULL_HANDLE;
+  VkDeviceMemory environmentMem_ = VK_NULL_HANDLE;
+  VkImageView environmentView_ = VK_NULL_HANDLE;
+  VkSampler envSampler_ = VK_NULL_HANDLE;
   VkPipelineLayout depthPipelineLayout_ = VK_NULL_HANDLE;
   VkPipeline depthPipeline_ = VK_NULL_HANDLE;
   VkDescriptorSetLayout compositeSetLayout_ = VK_NULL_HANDLE;
   VkDescriptorPool compositePool_ = VK_NULL_HANDLE;
   VkDescriptorSet compositeSet_ = VK_NULL_HANDLE;
   VkPipelineLayout compositePipelineLayout_ = VK_NULL_HANDLE;
+  VkPipeline backgroundPipeline_ = VK_NULL_HANDLE;
   VkPipeline compositePipeline_ = VK_NULL_HANDLE;
 
   FluidRenderSettings fluidSettings_{};
@@ -890,6 +931,220 @@ private:
     ci.pDependencies = &dep;
     vkCheck(vkCreateRenderPass(device_, &ci, nullptr, &renderPass_),
             "vkCreateRenderPass");
+  }
+
+  void createSceneTargets() {
+    sceneColorFormat_ = swapchainFormat_;
+    createImage2D(sceneColorFormat_,
+                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_SAMPLED_BIT,
+                  VK_IMAGE_ASPECT_COLOR_BIT, sceneColorImage_, sceneColorMem_,
+                  sceneColorView_, swapchainExtent_.width,
+                  swapchainExtent_.height);
+
+    if (!sceneSampler_) {
+      VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+      si.magFilter = VK_FILTER_LINEAR;
+      si.minFilter = VK_FILTER_LINEAR;
+      si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+      si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+      si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+      si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+      vkCheck(vkCreateSampler(device_, &si, nullptr, &sceneSampler_),
+              "vkCreateSampler(scene)");
+    }
+
+    if (!scenePass_) {
+      VkAttachmentDescription color{};
+      color.format = sceneColorFormat_;
+      color.samples = VK_SAMPLE_COUNT_1_BIT;
+      color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+      color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+      color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      color.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+      VkSubpassDescription subpass{};
+      subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+      subpass.colorAttachmentCount = 1;
+      subpass.pColorAttachments = &colorRef;
+      VkSubpassDependency dep{};
+      dep.srcSubpass = 0;
+      dep.dstSubpass = VK_SUBPASS_EXTERNAL;
+      dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+      dep.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+      dep.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+      VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+      rp.attachmentCount = 1;
+      rp.pAttachments = &color;
+      rp.subpassCount = 1;
+      rp.pSubpasses = &subpass;
+      rp.dependencyCount = 1;
+      rp.pDependencies = &dep;
+      vkCheck(vkCreateRenderPass(device_, &rp, nullptr, &scenePass_),
+              "vkCreateRenderPass(scene)");
+    }
+
+    VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fb.renderPass = scenePass_;
+    fb.attachmentCount = 1;
+    fb.pAttachments = &sceneColorView_;
+    fb.width = swapchainExtent_.width;
+    fb.height = swapchainExtent_.height;
+    fb.layers = 1;
+    vkCheck(vkCreateFramebuffer(device_, &fb, nullptr, &sceneFB_),
+            "vkCreateFramebuffer(scene)");
+  }
+
+  void createEnvironmentTexture() {
+    if (environmentImage_)
+      return;
+
+    std::vector<std::string> candidates = {
+        "media/uffizi_probe.hdr", "../media/uffizi_probe.hdr",
+        "../../media/uffizi_probe.hdr"};
+    int width = 0;
+    int height = 0;
+    int comp = 0;
+    float *pixels = nullptr;
+    for (const auto &path : candidates) {
+      pixels = stbi_loadf(path.c_str(), &width, &height, &comp, 4);
+      if (pixels)
+        break;
+    }
+
+    std::vector<float> fallback;
+    const float *src = pixels;
+    if (!src) {
+      width = 1024;
+      height = 512;
+      fallback.resize((size_t)width * (size_t)height * 4u);
+      for (int y = 0; y < height; ++y) {
+        float v = float(y) / float(height - 1);
+        for (int x = 0; x < width; ++x) {
+          float u = float(x) / float(width - 1);
+          float horizon = 1.0f - std::abs(v * 2.0f - 1.0f);
+          horizon = std::clamp(horizon, 0.0f, 1.0f);
+          float3 top = float3(0.18f, 0.34f, 0.62f);
+          float3 bottom = float3(0.02f, 0.05f, 0.10f);
+          float3 c = bottom * (1.0f - horizon) + top * horizon;
+          float sun = std::pow(std::max(0.0f, 1.0f - std::abs(u - 0.35f) * 12.0f), 4.0f) *
+                      std::pow(std::max(0.0f, 1.0f - std::abs(v - 0.22f) * 20.0f), 4.0f);
+          c += float3(1.0f, 0.92f, 0.78f) * sun * 2.0f;
+          size_t idx = (size_t(y) * (size_t)width + size_t(x)) * 4u;
+          fallback[idx + 0] = c.x;
+          fallback[idx + 1] = c.y;
+          fallback[idx + 2] = c.z;
+          fallback[idx + 3] = 1.0f;
+        }
+      }
+      src = fallback.data();
+    }
+
+    VkDeviceSize imageSize = VkDeviceSize(width) * VkDeviceSize(height) * 4u * sizeof(float);
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+    createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 staging, stagingMem);
+    void *mapped = nullptr;
+    vkMapMemory(device_, stagingMem, 0, imageSize, 0, &mapped);
+    std::memcpy(mapped, src, (size_t)imageSize);
+    vkUnmapMemory(device_, stagingMem);
+
+    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.imageType = VK_IMAGE_TYPE_2D;
+    ci.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+    ci.mipLevels = 1;
+    ci.arrayLayers = 1;
+    ci.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCheck(vkCreateImage(device_, &ci, nullptr, &environmentImage_),
+            "vkCreateImage(environment)");
+
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(device_, environmentImage_, &req);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex =
+        findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkCheck(vkAllocateMemory(device_, &ai, nullptr, &environmentMem_),
+            "vkAllocateMemory(environment)");
+    vkBindImageMemory(device_, environmentImage_, environmentMem_, 0);
+
+    VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pci.queueFamilyIndex = graphicsFamily_;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    vkCheck(vkCreateCommandPool(device_, &pci, nullptr, &pool),
+            "vkCreateCommandPool(environment)");
+
+    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cai.commandPool = pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    vkCheck(vkAllocateCommandBuffers(device_, &cai, &cmd),
+            "vkAllocateCommandBuffers(environment)");
+
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkCheck(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer(environment)");
+
+    transitionImageLayout(cmd, environmentImage_, VK_IMAGE_LAYOUT_UNDEFINED,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_ASPECT_COLOR_BIT);
+    copyBufferToImage(cmd, staging, environmentImage_,
+                      static_cast<uint32_t>(width),
+                      static_cast<uint32_t>(height));
+    transitionImageLayout(cmd, environmentImage_,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          VK_IMAGE_ASPECT_COLOR_BIT);
+
+    vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer(environment)");
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    vkCheck(vkQueueSubmit(graphicsQueue_, 1, &submit, VK_NULL_HANDLE),
+            "vkQueueSubmit(environment)");
+    vkCheck(vkQueueWaitIdle(graphicsQueue_), "vkQueueWaitIdle(environment)");
+
+    vkFreeCommandBuffers(device_, pool, 1, &cmd);
+    vkDestroyCommandPool(device_, pool, nullptr);
+    destroyBuffer(staging, stagingMem);
+
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = environmentImage_;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vi.subresourceRange.levelCount = 1;
+    vi.subresourceRange.layerCount = 1;
+    vkCheck(vkCreateImageView(device_, &vi, nullptr, &environmentView_),
+            "vkCreateImageView(environment)");
+
+    if (!envSampler_) {
+      VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+      si.magFilter = VK_FILTER_LINEAR;
+      si.minFilter = VK_FILTER_LINEAR;
+      si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+      si.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+      si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+      si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+      vkCheck(vkCreateSampler(device_, &si, nullptr, &envSampler_),
+              "vkCreateSampler(environment)");
+    }
+
+    if (pixels)
+      stbi_image_free(pixels);
   }
 
   uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags props) {
@@ -1284,9 +1539,17 @@ private:
   void createImage2D(VkFormat format, VkImageUsageFlags usage,
                      VkImageAspectFlags aspect, VkImage &image,
                      VkDeviceMemory &mem, VkImageView &view) {
+    createImage2D(format, usage, aspect, image, mem, view,
+                  swapchainExtent_.width, swapchainExtent_.height);
+  }
+
+  void createImage2D(VkFormat format, VkImageUsageFlags usage,
+                     VkImageAspectFlags aspect, VkImage &image,
+                     VkDeviceMemory &mem, VkImageView &view, uint32_t width,
+                     uint32_t height) {
     VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ci.imageType = VK_IMAGE_TYPE_2D;
-    ci.extent = {swapchainExtent_.width, swapchainExtent_.height, 1};
+    ci.extent = {width, height, 1};
     ci.mipLevels = 1;
     ci.arrayLayers = 1;
     ci.format = format;
@@ -1313,6 +1576,47 @@ private:
     vi.subresourceRange.layerCount = 1;
     vkCheck(vkCreateImageView(device_, &vi, nullptr, &view),
             "vkCreateImageView");
+  }
+
+  void transitionImageLayout(VkCommandBuffer cmd, VkImage image,
+                             VkImageLayout oldLayout,
+                             VkImageLayout newLayout,
+                             VkImageAspectFlags aspect) {
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.oldLayout = oldLayout;
+    barrier.newLayout = newLayout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = aspect;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+
+    VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
+        newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+      barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      dstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+               newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+      barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+      srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    }
+
+    vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1,
+                         &barrier);
+  }
+
+  void copyBufferToImage(VkCommandBuffer cmd, VkBuffer buffer, VkImage image,
+                         uint32_t width, uint32_t height) {
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {width, height, 1};
+    vkCmdCopyBufferToImage(cmd, buffer, image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
   }
 
   void createImGuiDescriptorPool() {
@@ -1489,20 +1793,22 @@ private:
                               fluidDepthPass_, depthPipelineLayout_, &bind,
                               &attr, /*attrCount*/ 1, /*depthTest*/ true);
 
-    VkDescriptorSetLayoutBinding sb{};
-    sb.binding = 0;
-    sb.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sb.descriptorCount = 1;
-    sb.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    std::array<VkDescriptorSetLayoutBinding, 3> sb{};
+    for (uint32_t i = 0; i < sb.size(); ++i) {
+      sb[i].binding = i;
+      sb[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+      sb[i].descriptorCount = 1;
+      sb[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
     VkDescriptorSetLayoutCreateInfo sl{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    sl.bindingCount = 1;
-    sl.pBindings = &sb;
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    sl.bindingCount = (uint32_t)sb.size();
+    sl.pBindings = sb.data();
     vkCheck(vkCreateDescriptorSetLayout(device_, &sl, nullptr,
                                         &compositeSetLayout_),
             "vkCreateDescriptorSetLayout(composite)");
 
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3};
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 9};
     VkDescriptorPoolCreateInfo pp{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pp.maxSets = 3; // composite + blurH + blurV
@@ -1523,30 +1829,29 @@ private:
             "vkAllocateDescriptorSets(blurV)");
     updateFluidDescriptors();
 
-    VkPushConstantRange blurPC{};
-    blurPC.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    blurPC.offset = 0;
-    blurPC.size = sizeof(float) * 4; // dir.xy, depthFalloff, radius
+    VkPushConstantRange waterPC{};
+    waterPC.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    waterPC.offset = 0;
+    waterPC.size = sizeof(WaterPush);
     VkPipelineLayoutCreateInfo bpl{
-        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+      VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     bpl.setLayoutCount = 1;
     bpl.pSetLayouts = &compositeSetLayout_;
     bpl.pushConstantRangeCount = 1;
-    bpl.pPushConstantRanges = &blurPC;
+    bpl.pPushConstantRanges = &waterPC;
+    vkCheck(vkCreatePipelineLayout(device_, &bpl, nullptr,
+                     &compositePipelineLayout_),
+        "vkCreatePipelineLayout(composite)");
     vkCheck(
-        vkCreatePipelineLayout(device_, &bpl, nullptr, &blurPipelineLayout_),
-        "vkCreatePipelineLayout(blur)");
+      vkCreatePipelineLayout(device_, &bpl, nullptr, &blurPipelineLayout_),
+      "vkCreatePipelineLayout(blur)");
     blurPipeline_ = buildGraphicsPipeline(
         "fullscreen.vert.spv", "fluid_blur.frag.spv", blurPass_,
         blurPipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false);
 
-    VkPipelineLayoutCreateInfo cpl{
-        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    cpl.setLayoutCount = 1;
-    cpl.pSetLayouts = &compositeSetLayout_;
-    vkCheck(vkCreatePipelineLayout(device_, &cpl, nullptr,
-                                   &compositePipelineLayout_),
-            "vkCreatePipelineLayout(composite)");
+    backgroundPipeline_ = buildGraphicsPipeline(
+      "fullscreen.vert.spv", "scene_background.frag.spv", scenePass_,
+      compositePipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false);
 
     compositePipeline_ = buildGraphicsPipeline(
         "fullscreen.vert.spv", "fluid_composite.frag.spv", renderPass_,
@@ -1554,22 +1859,25 @@ private:
   }
 
   void updateFluidDescriptors() {
-    auto writeSampler = [&](VkDescriptorSet set, VkImageView view) {
+    auto writeSampler = [&](VkDescriptorSet set, uint32_t binding,
+                VkImageView view, VkSampler sampler) {
       VkDescriptorImageInfo img{};
-      img.sampler = fluidSampler_;
+      img.sampler = sampler;
       img.imageView = view;
       img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
       VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       w.dstSet = set;
-      w.dstBinding = 0;
+      w.dstBinding = binding;
       w.descriptorCount = 1;
       w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
       w.pImageInfo = &img;
       vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
     };
-    writeSampler(blurSetH_, fluidDepthView_);
-    writeSampler(blurSetV_, blurTempView_);
-    writeSampler(compositeSet_, blurSmoothView_);
+    writeSampler(blurSetH_, 0, fluidDepthView_, fluidSampler_);
+    writeSampler(blurSetV_, 0, blurTempView_, fluidSampler_);
+    writeSampler(compositeSet_, 0, blurSmoothView_, fluidSampler_);
+    writeSampler(compositeSet_, 1, sceneColorView_, sceneSampler_);
+    writeSampler(compositeSet_, 2, environmentView_, envSampler_);
   }
 
   VkPipeline
@@ -1749,7 +2057,8 @@ private:
   }
 
   void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex,
-                           const DepthPush &dp, int substeps) {
+                           const DepthPush &dp, const WaterPush &wp,
+                           int substeps) {
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkCheck(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer");
 
@@ -1788,6 +2097,32 @@ private:
                         0.0f,
                         1.0f};
     VkRect2D scissor{{0, 0}, swapchainExtent_};
+
+    // Render the environment background first so the water shader can
+    // refract against it in screen space.
+    VkClearValue sceneClear{};
+    sceneClear.color = {{0.02f, 0.03f, 0.06f, 1.0f}};
+    VkRenderPassBeginInfo srp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    srp.renderPass = scenePass_;
+    srp.framebuffer = sceneFB_;
+    srp.renderArea.offset = {0, 0};
+    srp.renderArea.extent = swapchainExtent_;
+    srp.clearValueCount = 1;
+    srp.pClearValues = &sceneClear;
+    vkCmdBeginRenderPass(cmd, &srp, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, backgroundPipeline_);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                compositePipelineLayout_, 0, 1, &compositeSet_, 0,
+                nullptr);
+    vkCmdPushConstants(cmd, compositePipelineLayout_,
+               VK_SHADER_STAGE_VERTEX_BIT |
+                 VK_SHADER_STAGE_FRAGMENT_BIT,
+               0, sizeof(WaterPush), &wp);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+    colorToSampledBarrier(cmd, sceneColorImage_);
 
     // Render spheres to depth target
     std::array<VkClearValue, 2> depthClears{};
@@ -1867,6 +2202,10 @@ private:
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             compositePipelineLayout_, 0, 1, &compositeSet_, 0,
                             nullptr);
+    vkCmdPushConstants(cmd, compositePipelineLayout_,
+               VK_SHADER_STAGE_VERTEX_BIT |
+                 VK_SHADER_STAGE_FRAGMENT_BIT,
+               0, sizeof(WaterPush), &wp);
     vkCmdDraw(cmd, 3, 1, 0, 0); // fullscreen triangle
     if (imguiInitialized_)
       ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
@@ -1938,7 +2277,27 @@ private:
     }
   }
 
+  void destroySceneSizedTargets() {
+    if (sceneFB_) {
+      vkDestroyFramebuffer(device_, sceneFB_, nullptr);
+      sceneFB_ = VK_NULL_HANDLE;
+    }
+    if (sceneColorView_) {
+      vkDestroyImageView(device_, sceneColorView_, nullptr);
+      sceneColorView_ = VK_NULL_HANDLE;
+    }
+    if (sceneColorImage_) {
+      vkDestroyImage(device_, sceneColorImage_, nullptr);
+      sceneColorImage_ = VK_NULL_HANDLE;
+    }
+    if (sceneColorMem_) {
+      vkFreeMemory(device_, sceneColorMem_, nullptr);
+      sceneColorMem_ = VK_NULL_HANDLE;
+    }
+  }
+
   void cleanupSwapchain() {
+    destroySceneSizedTargets();
     destroyFluidSizedTargets();
     if (depthView_)
       vkDestroyImageView(device_, depthView_, nullptr);
@@ -1977,6 +2336,7 @@ private:
     createSwapchain();
     createImageViews();
     createDepthResources();
+    createSceneTargets();
     createFramebuffers();
     createFluidTargets();
     updateFluidDescriptors();

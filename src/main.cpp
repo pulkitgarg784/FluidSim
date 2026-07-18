@@ -9,6 +9,9 @@
 
 #include <imgui.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #include "linalg.h"
 #include "sph.h"
 #include "vk_renderer.h"
@@ -327,8 +330,8 @@ int main(int argc, char **argv) {
                               interactionStrengthSigned);
 
       // the simulation now runs entirely on the GPU inside drawFrame
-      renderer.drawFrame(view, proj, globalRight, camUp, renderRadius,
-                         renderer.simulationSubsteps());
+      renderer.drawFrame(view, proj, globalRight, camUp, globalViewDir,
+             renderRadius, renderer.simulationSubsteps());
 
       // Update FPS counter
       frameCount++;
