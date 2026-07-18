@@ -4,11 +4,15 @@ layout(location = 0) in vec2 vUV;
 layout(binding = 0) uniform sampler2D fluidDepth;
 layout(binding = 1) uniform sampler2D sceneColor;
 layout(binding = 2) uniform sampler2D environmentMap;
+layout(binding = 3) uniform sampler2D sceneDepth;
+layout(binding = 4) uniform sampler2D fluidThickness;
 
 layout(push_constant) uniform PC {
     vec4 camRight;
     vec4 camUp;
     vec4 camForward;
+    // x = refraction scale, y = absorption scale, z = base reflectance
+    vec4 material;
 } pc;
 
 layout(location = 0) out vec4 outColor;
@@ -68,6 +72,14 @@ void main() {
         return;
     }
 
+    // scene depth
+    float sceneD = texture(sceneDepth, vUV).r;
+    bool hasSceneSurface = sceneD < EMPTY * 0.5;
+    if (hasSceneSurface && sceneD <= d) {
+        outColor = texture(sceneColor, vUV);
+        return;
+    }
+
     vec2 invTexel = 1.0 / vec2(textureSize(fluidDepth, 0));
     vec3 P = viewPos(vUV, d);
     vec3 ddx = axisDeriv(vUV, d, P, vec2(invTexel.x, 0.0));
@@ -86,17 +98,29 @@ void main() {
 
     vec3 refrView = refract(-V, N, 1.0 / 1.333);
     vec2 refrOffset = refrView.xy / max(abs(refrView.z), 0.18);
-    vec2 refrUV = clamp(vUV + refrOffset * 0.10, vec2(0.0), vec2(1.0));
+    vec2 refrUV = clamp(vUV + refrOffset * pc.material.x, vec2(0.0), vec2(1.0));
+
+    // avoid refracting across a foreground object
+    float refrSceneD = texture(sceneDepth, refrUV).r;
+    bool refractsIntoScene = refrSceneD < EMPTY * 0.5;
+    if (refractsIntoScene && refrSceneD <= d)
+        refrUV = vUV;
     vec3 refraction = texture(sceneColor, refrUV).rgb;
 
     float fresnel = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 5.0);
-    float F0 = 0.02;
+    float F0 = pc.material.z;
     fresnel = mix(F0, 1.0, fresnel);
 
-    float thickness = clamp(d * 0.04, 0.0, 1.0);
-    vec3 absorption = exp(-vec3(0.08, 0.03, 0.015) * thickness * 6.0);
-    vec3 waterTint = vec3(0.03, 0.18, 0.26);
-    vec3 refracted = mix(refraction * absorption, waterTint, 0.12 * thickness);
+    // accumulated particle depth
+    float thickness = texture(fluidThickness, vUV).r;
+
+    // beer lambert
+    vec3 sigmaA = vec3(0.55, 0.25, 0.05);
+    vec3 transmittance = exp(-sigmaA * thickness * pc.material.y);
+
+    // Dark, blue-leaning water body color for deeper regions.
+    vec3 waterBody = vec3(0.015, 0.045, 0.085);
+    vec3 refracted = refraction * transmittance + waterBody * (1.0 - transmittance);
 
     vec3 col = mix(refracted, reflection, fresnel);
     outColor = vec4(col, 1.0);

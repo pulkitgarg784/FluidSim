@@ -44,8 +44,11 @@ set(SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_depth.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_depth.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_thickness.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fullscreen.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene_background.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene_mesh.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene_mesh.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_blur.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_composite.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_external.comp

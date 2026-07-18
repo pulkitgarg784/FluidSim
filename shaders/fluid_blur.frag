@@ -5,8 +5,9 @@ layout(binding = 0) uniform sampler2D src;
 
 layout(push_constant) uniform PC {
     vec2 dir;
-    float depthFalloff;
-    float radius;
+    float depthDifferenceStrength;
+    float maxScreenSpaceRadius;
+    float strength;
 } pc;
 
 layout(location = 0) out float outDepth;
@@ -20,8 +21,10 @@ void main() {
 
     float sum = 0.0;
     float wsum = 0.0;
-    int R = int(pc.radius);
-    float sigma2 = pc.radius * pc.radius * 0.5 + 1e-4;
+    float radius = pc.maxScreenSpaceRadius;
+    int R = int(ceil(radius));
+    float sigma = max(radius * pc.strength, 1e-4);
+    float sigma2 = sigma * sigma * 0.5;
     for (int i = -R; i <= R; i++) {
         vec2 uv = vUV + pc.dir * float(i);
         float d = texture(src, uv).r;
@@ -29,7 +32,7 @@ void main() {
             continue; // no water
         float wSpatial = exp(-float(i * i) / sigma2);
         float dd = d - centerD;
-        float wDepth = exp(-(dd * dd) * pc.depthFalloff);
+        float wDepth = exp(-(dd * dd) * pc.depthDifferenceStrength);
         float w = wSpatial * wDepth;
         sum += d * w;
         wsum += w;

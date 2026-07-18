@@ -1,7 +1,6 @@
 #version 450
 
 layout(location = 0) in vec2 vUV;
-
 layout(binding = 2) uniform sampler2D environmentMap;
 
 layout(push_constant) uniform PC {
@@ -11,9 +10,11 @@ layout(push_constant) uniform PC {
 } pc;
 
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out float outDepth;
 
 const float PI = 3.14159265358979323846;
 const float TAN_HALF_FOV = 0.41421356237;
+const float SCENE_BACKDROP_DEPTH = 1.0e4;
 
 vec2 directionToEnvUV(vec3 dir) {
     dir = normalize(dir);
@@ -34,4 +35,5 @@ void main() {
                             ndc.y * pc.camUp.xyz * TAN_HALF_FOV);
     vec3 env = texture(environmentMap, directionToEnvUV(rayDir)).rgb;
     outColor = vec4(env, 1.0);
+    outDepth = SCENE_BACKDROP_DEPTH / max(dot(rayDir, pc.camForward.xyz), 0.2);
 }

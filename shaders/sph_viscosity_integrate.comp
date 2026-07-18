@@ -58,11 +58,11 @@ void main() {
 
   vec3 velocity = vi + viscosity * P.viscosityStrength * P.deltaT;
 
-  // a particle should not cross most of a kernel in one step
-  float maxSpeed = 0.4 * P.smoothingRadius / max(P.deltaT, P.epsilon);
+  // displacement-based max speed (h / dt) currently commetned out
+  // float maxSpeed = 24.0;
   float speed2 = dot(velocity, velocity);
-  if (speed2 > maxSpeed * maxSpeed)
-    velocity *= maxSpeed * inversesqrt(speed2);
+  // if (speed2 > maxSpeed * maxSpeed)
+  //   velocity *= maxSpeed * inversesqrt(speed2);
 
   vec3 position = sortedPos[idx].xyz + velocity * P.deltaT;
   vec3 halfBounds = 0.5 * P.boundsSize.xyz;

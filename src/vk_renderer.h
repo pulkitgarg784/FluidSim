@@ -25,6 +25,10 @@ using namespace linalg::aliases;
 
 #include "vk_radix_sort.h"
 
+float *stbi_loadf(const char *filename, int *x, int *y, int *comp,
+                  int req_comp);
+void stbi_image_free(void *retval_from_stbi_load);
+
 #ifndef SHADER_DIR
 #define SHADER_DIR "shaders"
 #endif
@@ -99,11 +103,23 @@ struct WaterPush {
   float4 camRight;
   float4 camUp;
   float4 camForward;
+  // x = refraction scale, y = absorption scale, z = base reflectance
+  float4 material;
+};
+
+struct ScenePush {
+  float4x4 view;
+  float4x4 proj;
 };
 
 struct FluidRenderSettings {
-  float blurRadius = 8.0f;
-  float depthFalloff = 50.0f;
+  float maxBlurRadius = 8.0f;
+  float blurStrength = 1.0f;
+  float depthDifferenceStrength = 50.0f;
+  int blurIterations = 1;
+  float refractionStrength = 0.10f;
+  float absorptionScale = 1.1f;
+  float baseReflectance = 0.02f;
   int simulationSubsteps = 1;
   float simulationRate = 4.0f;
 };
@@ -141,6 +157,7 @@ public:
     createGraphicsPipeline();
     createComputePipelines();
     createQuadVertexBuffer();
+    createSceneMesh();
     createEnvironmentTexture();
     createFluidTargets();
     createFluidPipelines();
@@ -205,10 +222,23 @@ public:
     ImGui::TextUnformatted("Substeps improve quality without changing speed.");
     ImGui::Separator();
     ImGui::TextUnformatted("Screen-space reconstruction");
-    ImGui::SliderFloat("Blur radius (px)", &fluidSettings_.blurRadius, 0.0f,
-                       20.0f, "%.1f");
-    ImGui::SliderFloat("Depth falloff", &fluidSettings_.depthFalloff, 0.1f,
-                       250.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+    ImGui::SliderFloat("Max blur radius (px)",
+                       &fluidSettings_.maxBlurRadius, 1.0f, 32.0f, "%.1f");
+    ImGui::SliderFloat("Blur strength", &fluidSettings_.blurStrength, 0.05f,
+                       2.0f, "%.2f");
+    ImGui::SliderFloat("Depth difference strength",
+                       &fluidSettings_.depthDifferenceStrength, 0.1f, 250.0f,
+                       "%.1f", ImGuiSliderFlags_Logarithmic);
+    ImGui::SliderInt("Blur iterations", &fluidSettings_.blurIterations, 1, 6);
+    ImGui::Separator();
+    ImGui::TextUnformatted("Water material");
+    ImGui::SliderFloat("Refraction strength",
+                       &fluidSettings_.refractionStrength, 0.0f, 0.30f,
+                       "%.3f");
+    ImGui::SliderFloat("Absorption scale", &fluidSettings_.absorptionScale,
+                       0.0f, 12.0f, "%.2f");
+    ImGui::SliderFloat("Base reflectance", &fluidSettings_.baseReflectance,
+                       0.0f, 0.15f, "%.3f");
     ImGui::TextUnformatted("Click and drag outside this panel to orbit.");
     ImGui::End();
   }
@@ -279,6 +309,9 @@ public:
     wp.camRight = float4(camRight, 0.0f);
     wp.camUp = float4(camUp, 0.0f);
     wp.camForward = float4(camForward, 0.0f);
+    wp.material = float4(fluidSettings_.refractionStrength,
+                         fluidSettings_.absorptionScale,
+                         fluidSettings_.baseReflectance, 0.0f);
 
     if (imguiInitialized_)
       ImGui::Render();
@@ -354,10 +387,16 @@ public:
       vkDestroyPipeline(device_, compositePipeline_, nullptr);
     if (backgroundPipeline_)
       vkDestroyPipeline(device_, backgroundPipeline_, nullptr);
+    if (sceneMeshPipeline_)
+      vkDestroyPipeline(device_, sceneMeshPipeline_, nullptr);
+    if (sceneMeshPipelineLayout_)
+      vkDestroyPipelineLayout(device_, sceneMeshPipelineLayout_, nullptr);
     if (compositePipelineLayout_)
       vkDestroyPipelineLayout(device_, compositePipelineLayout_, nullptr);
     if (blurPipeline_)
       vkDestroyPipeline(device_, blurPipeline_, nullptr);
+    if (thicknessPipeline_)
+      vkDestroyPipeline(device_, thicknessPipeline_, nullptr);
     if (blurPipelineLayout_)
       vkDestroyPipelineLayout(device_, blurPipelineLayout_, nullptr);
     if (blurPass_)
@@ -417,6 +456,7 @@ public:
       vkDestroyBuffer(device_, quadBuffer_, nullptr);
       vkFreeMemory(device_, quadMemory_, nullptr);
     }
+    destroyBuffer(sceneMeshBuffer_, sceneMeshMemory_);
 
     for (auto sem : renderFinishedSemaphores_)
       if (sem)
@@ -521,6 +561,7 @@ private:
 
   VkFormat fluidDepthFormat_ = VK_FORMAT_R32_SFLOAT;
   VkFormat sceneColorFormat_ = VK_FORMAT_UNDEFINED;
+  VkFormat sceneDepthFormat_ = VK_FORMAT_R32_SFLOAT;
   VkImage fluidDepthImage_ = VK_NULL_HANDLE;
   VkDeviceMemory fluidDepthMem_ = VK_NULL_HANDLE;
   VkImageView fluidDepthView_ = VK_NULL_HANDLE;
@@ -530,6 +571,12 @@ private:
   VkImage sceneColorImage_ = VK_NULL_HANDLE;
   VkDeviceMemory sceneColorMem_ = VK_NULL_HANDLE;
   VkImageView sceneColorView_ = VK_NULL_HANDLE;
+  VkImage sceneDepthImage_ = VK_NULL_HANDLE;
+  VkDeviceMemory sceneDepthMem_ = VK_NULL_HANDLE;
+  VkImageView sceneDepthView_ = VK_NULL_HANDLE;
+  VkImage sceneZImage_ = VK_NULL_HANDLE;
+  VkDeviceMemory sceneZMem_ = VK_NULL_HANDLE;
+  VkImageView sceneZView_ = VK_NULL_HANDLE;
   VkRenderPass scenePass_ = VK_NULL_HANDLE;
   VkFramebuffer sceneFB_ = VK_NULL_HANDLE;
   VkRenderPass fluidDepthPass_ = VK_NULL_HANDLE;
@@ -547,6 +594,8 @@ private:
   VkDescriptorSet compositeSet_ = VK_NULL_HANDLE;
   VkPipelineLayout compositePipelineLayout_ = VK_NULL_HANDLE;
   VkPipeline backgroundPipeline_ = VK_NULL_HANDLE;
+  VkPipelineLayout sceneMeshPipelineLayout_ = VK_NULL_HANDLE;
+  VkPipeline sceneMeshPipeline_ = VK_NULL_HANDLE;
   VkPipeline compositePipeline_ = VK_NULL_HANDLE;
 
   FluidRenderSettings fluidSettings_{};
@@ -560,16 +609,25 @@ private:
   VkImage blurSmoothImage_ = VK_NULL_HANDLE;
   VkDeviceMemory blurSmoothMem_ = VK_NULL_HANDLE;
   VkImageView blurSmoothView_ = VK_NULL_HANDLE;
+  VkImage fluidThicknessImage_ = VK_NULL_HANDLE;
+  VkDeviceMemory fluidThicknessMem_ = VK_NULL_HANDLE;
+  VkImageView fluidThicknessView_ = VK_NULL_HANDLE;
   VkRenderPass blurPass_ = VK_NULL_HANDLE;
   VkFramebuffer blurTempFB_ = VK_NULL_HANDLE;
   VkFramebuffer blurSmoothFB_ = VK_NULL_HANDLE;
+  VkFramebuffer fluidThicknessFB_ = VK_NULL_HANDLE;
   VkPipelineLayout blurPipelineLayout_ = VK_NULL_HANDLE;
   VkPipeline blurPipeline_ = VK_NULL_HANDLE;
+  VkPipeline thicknessPipeline_ = VK_NULL_HANDLE;
   VkDescriptorSet blurSetH_ = VK_NULL_HANDLE;
   VkDescriptorSet blurSetV_ = VK_NULL_HANDLE;
+  VkDescriptorSet blurSetSmooth_ = VK_NULL_HANDLE;
 
   VkBuffer quadBuffer_ = VK_NULL_HANDLE;
   VkDeviceMemory quadMemory_ = VK_NULL_HANDLE;
+  VkBuffer sceneMeshBuffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory sceneMeshMemory_ = VK_NULL_HANDLE;
+  uint32_t sceneMeshVertexCount_ = 0;
 
   uint32_t numParticles_ = 0;
   uint32_t gridCellCount_ = 0;
@@ -941,6 +999,15 @@ private:
                   VK_IMAGE_ASPECT_COLOR_BIT, sceneColorImage_, sceneColorMem_,
                   sceneColorView_, swapchainExtent_.width,
                   swapchainExtent_.height);
+    createImage2D(sceneDepthFormat_,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+              VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT, sceneDepthImage_, sceneDepthMem_,
+            sceneDepthView_, swapchainExtent_.width,
+            swapchainExtent_.height);
+    createImage2D(depthFormat_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                  VK_IMAGE_ASPECT_DEPTH_BIT, sceneZImage_, sceneZMem_,
+                  sceneZView_, swapchainExtent_.width, swapchainExtent_.height);
 
     if (!sceneSampler_) {
       VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -964,11 +1031,33 @@ private:
       color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
       color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
       color.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      VkAttachmentDescription depth{};
+      depth.format = sceneDepthFormat_;
+      depth.samples = VK_SAMPLE_COUNT_1_BIT;
+      depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+      depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+      depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      depth.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      VkAttachmentDescription sceneZ{};
+      sceneZ.format = depthFormat_;
+      sceneZ.samples = VK_SAMPLE_COUNT_1_BIT;
+      sceneZ.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+      sceneZ.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      sceneZ.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      sceneZ.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      sceneZ.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      sceneZ.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
       VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+      VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+      VkAttachmentReference sceneZRef{2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+      std::array<VkAttachmentReference, 2> colorRefs = {colorRef, depthRef};
       VkSubpassDescription subpass{};
       subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-      subpass.colorAttachmentCount = 1;
-      subpass.pColorAttachments = &colorRef;
+      subpass.colorAttachmentCount = 2;
+      subpass.pColorAttachments = colorRefs.data();
+      subpass.pDepthStencilAttachment = &sceneZRef;
       VkSubpassDependency dep{};
       dep.srcSubpass = 0;
       dep.dstSubpass = VK_SUBPASS_EXTERNAL;
@@ -977,8 +1066,9 @@ private:
       dep.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
       dep.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
       VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-      rp.attachmentCount = 1;
-      rp.pAttachments = &color;
+      std::array<VkAttachmentDescription, 3> atts = {color, depth, sceneZ};
+      rp.attachmentCount = (uint32_t)atts.size();
+      rp.pAttachments = atts.data();
       rp.subpassCount = 1;
       rp.pSubpasses = &subpass;
       rp.dependencyCount = 1;
@@ -989,8 +1079,10 @@ private:
 
     VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
     fb.renderPass = scenePass_;
-    fb.attachmentCount = 1;
-    fb.pAttachments = &sceneColorView_;
+    std::array<VkImageView, 3> fbAtt = {sceneColorView_, sceneDepthView_,
+                                        sceneZView_};
+    fb.attachmentCount = (uint32_t)fbAtt.size();
+    fb.pAttachments = fbAtt.data();
     fb.width = swapchainExtent_.width;
     fb.height = swapchainExtent_.height;
     fb.layers = 1;
@@ -1377,6 +1469,37 @@ private:
     vkUnmapMemory(device_, quadMemory_);
   }
 
+  void createSceneMesh() {
+    // A floor and central box provide opaque geometry for the scene-depth pass.
+    // Each vertex is position.xyz followed by normal.xyz.
+    const float floorY = -1.45f;
+    const float v[] = {
+        -6, floorY, -4, 0,1,0,   6, floorY, -4, 0,1,0,   6, floorY, 4, 0,1,0,
+        -6, floorY, -4, 0,1,0,   6, floorY, 4, 0,1,0,   -6, floorY, 4, 0,1,0,
+        // Box: x=[-0.7,0.7], y=[-1.45,-0.15], z=[-0.7,0.7]
+        -0.7f,-1.45f, 0.7f, 0,0,1,   0.7f,-1.45f, 0.7f, 0,0,1,   0.7f,-0.15f, 0.7f, 0,0,1,
+        -0.7f,-1.45f, 0.7f, 0,0,1,   0.7f,-0.15f, 0.7f, 0,0,1,  -0.7f,-0.15f, 0.7f, 0,0,1,
+         0.7f,-1.45f,-0.7f, 0,0,-1, -0.7f,-1.45f,-0.7f, 0,0,-1, -0.7f,-0.15f,-0.7f, 0,0,-1,
+         0.7f,-1.45f,-0.7f, 0,0,-1, -0.7f,-0.15f,-0.7f, 0,0,-1,  0.7f,-0.15f,-0.7f, 0,0,-1,
+        -0.7f,-1.45f,-0.7f, -1,0,0, -0.7f,-1.45f,0.7f, -1,0,0, -0.7f,-0.15f,0.7f, -1,0,0,
+        -0.7f,-1.45f,-0.7f, -1,0,0, -0.7f,-0.15f,0.7f, -1,0,0, -0.7f,-0.15f,-0.7f, -1,0,0,
+         0.7f,-1.45f,0.7f, 1,0,0,  0.7f,-1.45f,-0.7f, 1,0,0,  0.7f,-0.15f,-0.7f, 1,0,0,
+         0.7f,-1.45f,0.7f, 1,0,0,  0.7f,-0.15f,-0.7f, 1,0,0,  0.7f,-0.15f,0.7f, 1,0,0,
+         -0.7f,-0.15f,0.7f, 0,1,0,  0.7f,-0.15f,0.7f, 0,1,0,  0.7f,-0.15f,-0.7f, 0,1,0,
+         -0.7f,-0.15f,0.7f, 0,1,0,  0.7f,-0.15f,-0.7f, 0,1,0, -0.7f,-0.15f,-0.7f, 0,1,0,
+    };
+    sceneMeshVertexCount_ = (uint32_t)(sizeof(v) / (sizeof(float) * 6));
+    VkDeviceSize size = sizeof(v);
+    createBuffer(size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 sceneMeshBuffer_, sceneMeshMemory_);
+    void *data = nullptr;
+    vkMapMemory(device_, sceneMeshMemory_, 0, size, 0, &data);
+    std::memcpy(data, v, (size_t)size);
+    vkUnmapMemory(device_, sceneMeshMemory_);
+  }
+
   void createComputeBuffers() {
     const VkMemoryPropertyFlags devLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     const VkBufferUsageFlags storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -1720,12 +1843,17 @@ private:
                       VK_IMAGE_USAGE_SAMPLED_BIT,
                   VK_IMAGE_ASPECT_COLOR_BIT, blurSmoothImage_, blurSmoothMem_,
                   blurSmoothView_);
+    createImage2D(fluidDepthFormat_,
+                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_SAMPLED_BIT,
+                  VK_IMAGE_ASPECT_COLOR_BIT, fluidThicknessImage_,
+                  fluidThicknessMem_, fluidThicknessView_);
 
     if (!blurPass_) { // color-only pass, reused across resizes
       VkAttachmentDescription bc{};
       bc.format = fluidDepthFormat_;
       bc.samples = VK_SAMPLE_COUNT_1_BIT;
-      bc.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; // fully overwritten
+      bc.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
       bc.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
       bc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
       bc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -1766,6 +1894,9 @@ private:
     bfb.pAttachments = &blurSmoothView_;
     vkCheck(vkCreateFramebuffer(device_, &bfb, nullptr, &blurSmoothFB_),
             "vkCreateFramebuffer(blurSmooth)");
+    bfb.pAttachments = &fluidThicknessView_;
+    vkCheck(vkCreateFramebuffer(device_, &bfb, nullptr, &fluidThicknessFB_),
+            "vkCreateFramebuffer(fluidThickness)");
   }
 
   void createFluidPipelines() {
@@ -1793,7 +1924,7 @@ private:
                               fluidDepthPass_, depthPipelineLayout_, &bind,
                               &attr, /*attrCount*/ 1, /*depthTest*/ true);
 
-    std::array<VkDescriptorSetLayoutBinding, 3> sb{};
+    std::array<VkDescriptorSetLayoutBinding, 5> sb{};
     for (uint32_t i = 0; i < sb.size(); ++i) {
       sb[i].binding = i;
       sb[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1808,10 +1939,10 @@ private:
                                         &compositeSetLayout_),
             "vkCreateDescriptorSetLayout(composite)");
 
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 9};
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 20};
     VkDescriptorPoolCreateInfo pp{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pp.maxSets = 3; // composite + blurH + blurV
+    pp.maxSets = 4; // composite + blurH + blurV + blurSmooth
     pp.poolSizeCount = 1;
     pp.pPoolSizes = &ps;
     vkCheck(vkCreateDescriptorPool(device_, &pp, nullptr, &compositePool_),
@@ -1827,6 +1958,8 @@ private:
             "vkAllocateDescriptorSets(blurH)");
     vkCheck(vkAllocateDescriptorSets(device_, &sa, &blurSetV_),
             "vkAllocateDescriptorSets(blurV)");
+    vkCheck(vkAllocateDescriptorSets(device_, &sa, &blurSetSmooth_),
+            "vkAllocateDescriptorSets(blurSmooth)");
     updateFluidDescriptors();
 
     VkPushConstantRange waterPC{};
@@ -1848,10 +1981,33 @@ private:
     blurPipeline_ = buildGraphicsPipeline(
         "fullscreen.vert.spv", "fluid_blur.frag.spv", blurPass_,
         blurPipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false);
+    thicknessPipeline_ = buildGraphicsPipeline(
+        "fluid_depth.vert.spv", "fluid_thickness.frag.spv", blurPass_,
+        depthPipelineLayout_, &bind, &attr, /*attrCount*/ 1,
+        /*depthTest*/ false, 1, /*additiveBlend*/ true);
 
     backgroundPipeline_ = buildGraphicsPipeline(
       "fullscreen.vert.spv", "scene_background.frag.spv", scenePass_,
-      compositePipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false);
+      compositePipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false, 2);
+
+    VkPushConstantRange scenePC{};
+    scenePC.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    scenePC.size = sizeof(ScenePush);
+    VkPipelineLayoutCreateInfo spl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    spl.pushConstantRangeCount = 1;
+    spl.pPushConstantRanges = &scenePC;
+    vkCheck(vkCreatePipelineLayout(device_, &spl, nullptr, &sceneMeshPipelineLayout_),
+            "vkCreatePipelineLayout(scene mesh)");
+    VkVertexInputBindingDescription sceneBind{0, sizeof(float) * 6,
+                                               VK_VERTEX_INPUT_RATE_VERTEX};
+    std::array<VkVertexInputAttributeDescription, 2> sceneAttr = {{
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+        {1, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(float) * 3},
+    }};
+    sceneMeshPipeline_ = buildGraphicsPipeline(
+        "scene_mesh.vert.spv", "scene_mesh.frag.spv", scenePass_,
+        sceneMeshPipelineLayout_, &sceneBind, sceneAttr.data(),
+        (uint32_t)sceneAttr.size(), /*depthTest*/ true, 2);
 
     compositePipeline_ = buildGraphicsPipeline(
         "fullscreen.vert.spv", "fluid_composite.frag.spv", renderPass_,
@@ -1875,9 +2031,12 @@ private:
     };
     writeSampler(blurSetH_, 0, fluidDepthView_, fluidSampler_);
     writeSampler(blurSetV_, 0, blurTempView_, fluidSampler_);
+    writeSampler(blurSetSmooth_, 0, blurSmoothView_, fluidSampler_);
     writeSampler(compositeSet_, 0, blurSmoothView_, fluidSampler_);
     writeSampler(compositeSet_, 1, sceneColorView_, sceneSampler_);
     writeSampler(compositeSet_, 2, environmentView_, envSampler_);
+    writeSampler(compositeSet_, 3, sceneDepthView_, sceneSampler_);
+    writeSampler(compositeSet_, 4, fluidThicknessView_, fluidSampler_);
   }
 
   VkPipeline
@@ -1885,7 +2044,9 @@ private:
                         VkRenderPass pass, VkPipelineLayout layout,
                         const VkVertexInputBindingDescription *bind,
                         const VkVertexInputAttributeDescription *attr,
-                        uint32_t attrCount, bool depthTest) {
+                        uint32_t attrCount, bool depthTest,
+                        uint32_t colorAttachmentCount = 1,
+                        bool additiveBlend = false) {
     VkShaderModule vert =
         createShaderModule(readFile(std::string(SHADER_DIR) + "/" + vertSpv));
     VkShaderModule frag =
@@ -1937,14 +2098,26 @@ private:
     ds.depthWriteEnable = depthTest ? VK_TRUE : VK_FALSE;
     ds.depthCompareOp = VK_COMPARE_OP_LESS;
 
-    VkPipelineColorBlendAttachmentState cba{};
-    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    cba.blendEnable = VK_FALSE;
+    std::vector<VkPipelineColorBlendAttachmentState> cba(colorAttachmentCount);
+    for (auto &attachment : cba) {
+      attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
+                                  VK_COLOR_COMPONENT_G_BIT |
+                                  VK_COLOR_COMPONENT_B_BIT |
+                                  VK_COLOR_COMPONENT_A_BIT;
+      attachment.blendEnable = additiveBlend ? VK_TRUE : VK_FALSE;
+      if (additiveBlend) {
+        attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        attachment.colorBlendOp = VK_BLEND_OP_ADD;
+        attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        attachment.alphaBlendOp = VK_BLEND_OP_ADD;
+      }
+    }
     VkPipelineColorBlendStateCreateInfo cb{
         VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    cb.attachmentCount = 1;
-    cb.pAttachments = &cba;
+    cb.attachmentCount = colorAttachmentCount;
+    cb.pAttachments = cba.data();
 
     std::array<VkDynamicState, 2> dynStates = {VK_DYNAMIC_STATE_VIEWPORT,
                                                VK_DYNAMIC_STATE_SCISSOR};
@@ -2102,13 +2275,19 @@ private:
     // refract against it in screen space.
     VkClearValue sceneClear{};
     sceneClear.color = {{0.02f, 0.03f, 0.06f, 1.0f}};
+    VkClearValue sceneDepthClear{};
+    sceneDepthClear.color = {{1.0e4f, 0.0f, 0.0f, 0.0f}};
     VkRenderPassBeginInfo srp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     srp.renderPass = scenePass_;
     srp.framebuffer = sceneFB_;
     srp.renderArea.offset = {0, 0};
     srp.renderArea.extent = swapchainExtent_;
-    srp.clearValueCount = 1;
-    srp.pClearValues = &sceneClear;
+    VkClearValue sceneZClear{};
+    sceneZClear.depthStencil = {1.0f, 0};
+    std::array<VkClearValue, 3> sceneClears = {sceneClear, sceneDepthClear,
+                                                sceneZClear};
+    srp.clearValueCount = (uint32_t)sceneClears.size();
+    srp.pClearValues = sceneClears.data();
     vkCmdBeginRenderPass(cmd, &srp, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, backgroundPipeline_);
     vkCmdSetViewport(cmd, 0, 1, &viewport);
@@ -2121,8 +2300,51 @@ private:
                  VK_SHADER_STAGE_FRAGMENT_BIT,
                0, sizeof(WaterPush), &wp);
     vkCmdDraw(cmd, 3, 1, 0, 0);
+
+    // Opaque geometry writes both regular depth (for visibility) and linear
+    // view-space depth (for the later fluid thickness/refraction pass).
+    ScenePush scenePush{};
+    scenePush.view = dp.view;
+    scenePush.proj = dp.proj;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneMeshPipeline_);
+    vkCmdPushConstants(cmd, sceneMeshPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+                       0, sizeof(ScenePush), &scenePush);
+    VkBuffer sceneVB[] = {sceneMeshBuffer_};
+    VkDeviceSize sceneOffsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, sceneVB, sceneOffsets);
+    vkCmdDraw(cmd, sceneMeshVertexCount_, 1, 0, 0);
     vkCmdEndRenderPass(cmd);
     colorToSampledBarrier(cmd, sceneColorImage_);
+    colorToSampledBarrier(cmd, sceneDepthImage_);
+
+    // Accumulate particle discs into a thickness texture.  This is separate
+    // from surface depth: overlapping particles add optical path length.
+    VkClearValue thicknessClear{};
+    thicknessClear.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    VkRenderPassBeginInfo trp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    trp.renderPass = blurPass_;
+    trp.framebuffer = fluidThicknessFB_;
+    trp.renderArea.offset = {0, 0};
+    trp.renderArea.extent = swapchainExtent_;
+    trp.clearValueCount = 1;
+    trp.pClearValues = &thicknessClear;
+    vkCmdBeginRenderPass(cmd, &trp, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, thicknessPipeline_);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdPushConstants(cmd, depthPipelineLayout_,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(DepthPush), &dp);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            depthPipelineLayout_, 0, 1, &descriptorSet_, 0,
+                            nullptr);
+    VkBuffer thicknessVB[] = {quadBuffer_};
+    VkDeviceSize thicknessOffsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, thicknessVB, thicknessOffsets);
+    if (numParticles_ > 0)
+      vkCmdDraw(cmd, 6, numParticles_, 0, 0);
+    vkCmdEndRenderPass(cmd);
+    colorToSampledBarrier(cmd, fluidThicknessImage_);
 
     // Render spheres to depth target
     std::array<VkClearValue, 2> depthClears{};
@@ -2167,9 +2389,12 @@ private:
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline_);
       vkCmdSetViewport(cmd, 0, 1, &viewport);
       vkCmdSetScissor(cmd, 0, 1, &scissor);
-      float bpc[4] = {
-          dx, dy, fluidSettings_.depthFalloff,
-          fluidSettings_.blurRadius}; // dir, depthFalloff, radius(px)
+      float bpc[5] = {
+          dx,
+          dy,
+          fluidSettings_.depthDifferenceStrength,
+          fluidSettings_.maxBlurRadius,
+          fluidSettings_.blurStrength};
       vkCmdPushConstants(cmd, blurPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
                          0, sizeof(bpc), bpc);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2179,10 +2404,13 @@ private:
     };
     float invW = 1.0f / (float)swapchainExtent_.width;
     float invH = 1.0f / (float)swapchainExtent_.height;
-    blurPass(blurTempFB_, blurSetH_, invW, 0.0f); // horizontal
-    colorToSampledBarrier(cmd, blurTempImage_);
-    blurPass(blurSmoothFB_, blurSetV_, 0.0f, invH); // vertical
-    colorToSampledBarrier(cmd, blurSmoothImage_);
+    for (int i = 0; i < fluidSettings_.blurIterations; ++i) {
+      blurPass(blurTempFB_, i == 0 ? blurSetH_ : blurSetSmooth_, invW,
+               0.0f); // horizontal
+      colorToSampledBarrier(cmd, blurTempImage_);
+      blurPass(blurSmoothFB_, blurSetV_, 0.0f, invH); // vertical
+      colorToSampledBarrier(cmd, blurSmoothImage_);
+    }
 
     // composite into swapchain image
     std::array<VkClearValue, 2> clears{};
@@ -2215,6 +2443,22 @@ private:
   }
 
   void destroyFluidSizedTargets() {
+    if (fluidThicknessFB_) {
+      vkDestroyFramebuffer(device_, fluidThicknessFB_, nullptr);
+      fluidThicknessFB_ = VK_NULL_HANDLE;
+    }
+    if (fluidThicknessView_) {
+      vkDestroyImageView(device_, fluidThicknessView_, nullptr);
+      fluidThicknessView_ = VK_NULL_HANDLE;
+    }
+    if (fluidThicknessImage_) {
+      vkDestroyImage(device_, fluidThicknessImage_, nullptr);
+      fluidThicknessImage_ = VK_NULL_HANDLE;
+    }
+    if (fluidThicknessMem_) {
+      vkFreeMemory(device_, fluidThicknessMem_, nullptr);
+      fluidThicknessMem_ = VK_NULL_HANDLE;
+    }
     if (fluidDepthFB_) {
       vkDestroyFramebuffer(device_, fluidDepthFB_, nullptr);
       fluidDepthFB_ = VK_NULL_HANDLE;
@@ -2293,6 +2537,30 @@ private:
     if (sceneColorMem_) {
       vkFreeMemory(device_, sceneColorMem_, nullptr);
       sceneColorMem_ = VK_NULL_HANDLE;
+    }
+    if (sceneDepthView_) {
+      vkDestroyImageView(device_, sceneDepthView_, nullptr);
+      sceneDepthView_ = VK_NULL_HANDLE;
+    }
+    if (sceneDepthImage_) {
+      vkDestroyImage(device_, sceneDepthImage_, nullptr);
+      sceneDepthImage_ = VK_NULL_HANDLE;
+    }
+    if (sceneDepthMem_) {
+      vkFreeMemory(device_, sceneDepthMem_, nullptr);
+      sceneDepthMem_ = VK_NULL_HANDLE;
+    }
+    if (sceneZView_) {
+      vkDestroyImageView(device_, sceneZView_, nullptr);
+      sceneZView_ = VK_NULL_HANDLE;
+    }
+    if (sceneZImage_) {
+      vkDestroyImage(device_, sceneZImage_, nullptr);
+      sceneZImage_ = VK_NULL_HANDLE;
+    }
+    if (sceneZMem_) {
+      vkFreeMemory(device_, sceneZMem_, nullptr);
+      sceneZMem_ = VK_NULL_HANDLE;
     }
   }
 
