@@ -675,6 +675,9 @@ private:
   VkImage fluidThicknessImage_ = VK_NULL_HANDLE;
   VkDeviceMemory fluidThicknessMem_ = VK_NULL_HANDLE;
   VkImageView fluidThicknessView_ = VK_NULL_HANDLE;
+  VkImage thicknessBlurTempImage_ = VK_NULL_HANDLE;
+  VkDeviceMemory thicknessBlurTempMem_ = VK_NULL_HANDLE;
+  VkImageView thicknessBlurTempView_ = VK_NULL_HANDLE;
   VkImage waterShadowImage_ = VK_NULL_HANDLE;
   VkDeviceMemory waterShadowMem_ = VK_NULL_HANDLE;
   VkImageView waterShadowView_ = VK_NULL_HANDLE;
@@ -688,6 +691,7 @@ private:
   VkFramebuffer blurTempFB_ = VK_NULL_HANDLE;
   VkFramebuffer blurSmoothFB_ = VK_NULL_HANDLE;
   VkFramebuffer fluidThicknessFB_ = VK_NULL_HANDLE;
+  VkFramebuffer thicknessBlurTempFB_ = VK_NULL_HANDLE;
   VkFramebuffer waterShadowFB_ = VK_NULL_HANDLE;
   VkFramebuffer waterShadowDepthFB_ = VK_NULL_HANDLE;
   VkPipelineLayout blurPipelineLayout_ = VK_NULL_HANDLE;
@@ -698,6 +702,7 @@ private:
   VkDescriptorSet blurSetV_ = VK_NULL_HANDLE;
   VkDescriptorSet blurSetSmooth_ = VK_NULL_HANDLE;
   VkDescriptorSet thicknessBlurSet_ = VK_NULL_HANDLE;
+  VkDescriptorSet thicknessBlurSetV_ = VK_NULL_HANDLE;
 
   VkBuffer quadBuffer_ = VK_NULL_HANDLE;
   VkDeviceMemory quadMemory_ = VK_NULL_HANDLE;
@@ -1952,6 +1957,11 @@ private:
     createImage2D(fluidDepthFormat_,
                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                       VK_IMAGE_USAGE_SAMPLED_BIT,
+                  VK_IMAGE_ASPECT_COLOR_BIT, thicknessBlurTempImage_,
+                  thicknessBlurTempMem_, thicknessBlurTempView_);
+    createImage2D(fluidDepthFormat_,
+                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_SAMPLED_BIT,
                   VK_IMAGE_ASPECT_COLOR_BIT, waterShadowImage_,
                   waterShadowMem_, waterShadowView_, 1024, 1024);
     createImage2D(fluidDepthFormat_,
@@ -2011,6 +2021,9 @@ private:
     bfb.pAttachments = &fluidThicknessView_;
     vkCheck(vkCreateFramebuffer(device_, &bfb, nullptr, &fluidThicknessFB_),
             "vkCreateFramebuffer(fluidThickness)");
+    bfb.pAttachments = &thicknessBlurTempView_;
+    vkCheck(vkCreateFramebuffer(device_, &bfb, nullptr, &thicknessBlurTempFB_),
+            "vkCreateFramebuffer(thicknessBlurTemp)");
     bfb.width = 1024;
     bfb.height = 1024;
     bfb.pAttachments = &waterShadowView_;
@@ -2080,12 +2093,12 @@ private:
             "vkCreateDescriptorSetLayout(composite)");
 
     std::array<VkDescriptorPoolSize, 2> ps = {{
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 35},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 42},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 6},
     }};
     VkDescriptorPoolCreateInfo pp{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pp.maxSets = 5; // composite + blurH + blurV + blurSmooth + thickness blur
+    pp.maxSets = 6; // composite + three depth blur + two thickness blur sets
     pp.poolSizeCount = (uint32_t)ps.size();
     pp.pPoolSizes = ps.data();
     vkCheck(vkCreateDescriptorPool(device_, &pp, nullptr, &compositePool_),
@@ -2105,6 +2118,8 @@ private:
             "vkAllocateDescriptorSets(blurSmooth)");
     vkCheck(vkAllocateDescriptorSets(device_, &sa, &thicknessBlurSet_),
             "vkAllocateDescriptorSets(thicknessBlur)");
+    vkCheck(vkAllocateDescriptorSets(device_, &sa, &thicknessBlurSetV_),
+            "vkAllocateDescriptorSets(thicknessBlurV)");
     updateFluidDescriptors();
 
     VkPushConstantRange waterPC{};
@@ -2183,6 +2198,7 @@ private:
     writeSampler(blurSetV_, 0, blurTempView_, fluidSampler_);
     writeSampler(blurSetSmooth_, 0, blurSmoothView_, fluidSampler_);
     writeSampler(thicknessBlurSet_, 0, fluidThicknessView_, fluidSampler_);
+    writeSampler(thicknessBlurSetV_, 0, thicknessBlurTempView_, fluidSampler_);
     writeSampler(compositeSet_, 0, blurSmoothView_, fluidSampler_);
     writeSampler(compositeSet_, 1, sceneColorView_, sceneSampler_);
     writeSampler(compositeSet_, 2, environmentView_, envSampler_);
@@ -2674,26 +2690,31 @@ private:
       colorToSampledBarrier(cmd, blurSmoothImage_);
     }
 
-    // thickness blur pass
-    VkRenderPassBeginInfo thicknessBlurRp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    thicknessBlurRp.renderPass = blurPass_;
-    thicknessBlurRp.framebuffer = blurTempFB_;
-    thicknessBlurRp.renderArea.extent = swapchainExtent_;
-    vkCmdBeginRenderPass(cmd, &thicknessBlurRp, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      thicknessBlurPipeline_);
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
-    float thicknessBlurPC[5] = {0.0f, 0.0f, 0.0f,
-                                fluidSettings_.maxBlurRadius,
-                                fluidSettings_.blurStrength};
-    vkCmdPushConstants(cmd, blurPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(thicknessBlurPC), thicknessBlurPC);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            blurPipelineLayout_, 0, 1, &thicknessBlurSet_, 0,
-                            nullptr);
-    vkCmdDraw(cmd, 3, 1, 0, 0);
-    vkCmdEndRenderPass(cmd);
+    // two pass thickness blur
+    auto thicknessBlurPass = [&](VkFramebuffer fb, VkDescriptorSet src,
+                                 float dx, float dy) {
+      VkRenderPassBeginInfo brp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+      brp.renderPass = blurPass_;
+      brp.framebuffer = fb;
+      brp.renderArea.extent = swapchainExtent_;
+      vkCmdBeginRenderPass(cmd, &brp, VK_SUBPASS_CONTENTS_INLINE);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        thicknessBlurPipeline_);
+      vkCmdSetViewport(cmd, 0, 1, &viewport);
+      vkCmdSetScissor(cmd, 0, 1, &scissor);
+      float thicknessBlurPC[5] = {dx, dy, 0.0f,
+                                  fluidSettings_.maxBlurRadius,
+                                  fluidSettings_.blurStrength};
+      vkCmdPushConstants(cmd, blurPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
+                         0, sizeof(thicknessBlurPC), thicknessBlurPC);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              blurPipelineLayout_, 0, 1, &src, 0, nullptr);
+      vkCmdDraw(cmd, 3, 1, 0, 0);
+      vkCmdEndRenderPass(cmd);
+    };
+    thicknessBlurPass(thicknessBlurTempFB_, thicknessBlurSet_, 1.0f, 0.0f);
+    colorToSampledBarrier(cmd, thicknessBlurTempImage_);
+    thicknessBlurPass(blurTempFB_, thicknessBlurSetV_, 0.0f, 1.0f);
     colorToSampledBarrier(cmd, blurTempImage_);
 
     // composite into swapchain image
@@ -2823,6 +2844,10 @@ private:
       vkDestroyFramebuffer(device_, blurSmoothFB_, nullptr);
       blurSmoothFB_ = VK_NULL_HANDLE;
     }
+    if (thicknessBlurTempFB_) {
+      vkDestroyFramebuffer(device_, thicknessBlurTempFB_, nullptr);
+      thicknessBlurTempFB_ = VK_NULL_HANDLE;
+    }
     if (blurTempView_) {
       vkDestroyImageView(device_, blurTempView_, nullptr);
       blurTempView_ = VK_NULL_HANDLE;
@@ -2846,6 +2871,18 @@ private:
     if (blurSmoothMem_) {
       vkFreeMemory(device_, blurSmoothMem_, nullptr);
       blurSmoothMem_ = VK_NULL_HANDLE;
+    }
+    if (thicknessBlurTempView_) {
+      vkDestroyImageView(device_, thicknessBlurTempView_, nullptr);
+      thicknessBlurTempView_ = VK_NULL_HANDLE;
+    }
+    if (thicknessBlurTempImage_) {
+      vkDestroyImage(device_, thicknessBlurTempImage_, nullptr);
+      thicknessBlurTempImage_ = VK_NULL_HANDLE;
+    }
+    if (thicknessBlurTempMem_) {
+      vkFreeMemory(device_, thicknessBlurTempMem_, nullptr);
+      thicknessBlurTempMem_ = VK_NULL_HANDLE;
     }
   }
 

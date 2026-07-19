@@ -19,12 +19,10 @@ void main() {
     float sigma = max(float(radius) * 0.65, 0.75);
     float sum = 0.0;
     float weights = 0.0;
-    for (int y = -radius; y <= radius; ++y) {
-        for (int x = -radius; x <= radius; ++x) {
-            float w = exp(-float(x * x + y * y) / (2.0 * sigma * sigma));
-            sum += texture(src, vUV + vec2(x, y) * texel).r * w;
-            weights += w;
-        }
+    for (int i = -radius; i <= radius; ++i) {
+        float w = exp(-float(i * i) / (2.0 * sigma * sigma));
+        sum += texture(src, vUV + pc.dir * float(i) * texel).r * w;
+        weights += w;
     }
     outThickness = sum / weights;
 }
