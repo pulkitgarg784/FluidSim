@@ -142,6 +142,7 @@ struct FluidRenderSettings {
   float sunAzimuthDegrees = 36.0f;
   float sunElevationDegrees = 53.0f;
   float shadowAmbientLight = 0.17f;
+  int shadowUpdateInterval = 2;
   int simulationSubsteps = 1;
   float simulationRate = 4.0f;
 };
@@ -158,6 +159,7 @@ public:
   // A single simulation state lives in the SSBOs, so we serialize to one
   // frame in flight to avoid two frames racing on those buffers.
   static constexpr int kMaxFramesInFlight = 1;
+  // costly 1024x1024 particle raster passes every frame.
   static constexpr uint32_t kWaterShadowMapSize = 512;
 
   void init(int width, int height, const char *title, uint32_t numParticles) {
@@ -298,6 +300,9 @@ public:
     ImGui::SliderFloat("Shadow ambient light",
                        &fluidSettings_.shadowAmbientLight, 0.0f, 0.75f,
                        "%.2f");
+    ImGui::SliderInt("Shadow update interval",
+                     &fluidSettings_.shadowUpdateInterval, 1, 4,
+                     "%d frames");
     ImGui::TextUnformatted("Click and drag outside this panel to orbit.");
     ImGui::End();
   }
@@ -337,6 +342,7 @@ public:
                     UINT64_MAX);
 
     if (std::abs(fluidSettings_.renderScale - activeRenderScale_) > 0.001f) {
+      // This only stalls when the user changes the quality control.
       vkDeviceWaitIdle(device_);
       destroyFluidSizedTargets();
       createFluidTargets();
@@ -388,6 +394,7 @@ public:
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
     vkResetCommandBuffer(cmd, 0);
     recordCommandBuffer(cmd, imageIndex, dp, wp, substeps);
+    ++renderedFrameCount_;
 
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     VkSemaphore waitSemaphores[] = {imageAvailableSemaphores_[currentFrame_]};
@@ -512,6 +519,7 @@ public:
     destroyBuffer(keysBuf_, keysMem_);
     destroyBuffer(indicesBuf_, indicesMem_);
     destroyBuffer(startBuf_, startMem_);
+    destroyBuffer(endBuf_, endMem_);
     destroyBuffer(sortedPosBuf_, sortedPosMem_);
     destroyBuffer(sortedVelBuf_, sortedVelMem_);
     destroyBuffer(sortedPredBuf_, sortedPredMem_);
@@ -636,6 +644,10 @@ private:
   VkFormat fluidDepthFormat_ = VK_FORMAT_R32_SFLOAT;
   VkExtent2D fluidExtent_{};
   float activeRenderScale_ = 0.0f;
+  uint64_t renderedFrameCount_ = 0;
+  bool waterShadowValid_ = false;
+  float shadowSunAzimuth_ = 1.0e9f;
+  float shadowSunElevation_ = 1.0e9f;
   VkFormat sceneColorFormat_ = VK_FORMAT_UNDEFINED;
   VkFormat sceneDepthFormat_ = VK_FORMAT_R32_SFLOAT;
   VkImage fluidDepthImage_ = VK_NULL_HANDLE;
@@ -753,6 +765,8 @@ private:
   VkDeviceMemory indicesMem_ = VK_NULL_HANDLE;
   VkBuffer startBuf_ = VK_NULL_HANDLE;
   VkDeviceMemory startMem_ = VK_NULL_HANDLE;
+  VkBuffer endBuf_ = VK_NULL_HANDLE;
+  VkDeviceMemory endMem_ = VK_NULL_HANDLE;
 
   // sorted-order scratch buffers
   VkBuffer sortedPosBuf_ = VK_NULL_HANDLE;
@@ -1627,6 +1641,7 @@ private:
     createBuffer(uintSize, storage, devLocal, keysBuf_, keysMem_);
     createBuffer(uintSize, storage, devLocal, indicesBuf_, indicesMem_);
     createBuffer(startSize, storage, devLocal, startBuf_, startMem_);
+    createBuffer(startSize, storage, devLocal, endBuf_, endMem_);
 
     createBuffer(vec4Size, storage, devLocal, sortedPosBuf_, sortedPosMem_);
     createBuffer(vec4Size, storage, devLocal, sortedVelBuf_, sortedVelMem_);
@@ -1672,8 +1687,8 @@ private:
   }
 
   void createDescriptorSetLayout() {
-    constexpr std::array<uint32_t, 12> bindings = {0, 1, 2, 3,  5,  6,
-                                                   7, 8, 9, 10, 11, 12};
+    constexpr std::array<uint32_t, 13> bindings = {
+        0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13};
     std::array<VkDescriptorSetLayoutBinding, bindings.size()> layoutBindings{};
     for (size_t i = 0; i < bindings.size(); ++i) {
       auto &binding = layoutBindings[i];
@@ -1698,7 +1713,7 @@ private:
 
   void createDescriptorPoolAndSet() {
     std::array<VkDescriptorPoolSize, 2> sizes{};
-    sizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10};
+    sizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11};
     sizes[1] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2};
     VkDescriptorPoolCreateInfo pi{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -1716,14 +1731,15 @@ private:
     vkCheck(vkAllocateDescriptorSets(device_, &ai, &descriptorSet_),
             "vkAllocateDescriptorSets");
 
-    constexpr std::array<uint32_t, 12> bindings = {0, 1, 2, 3,  5,  6,
-                                                   7, 8, 9, 10, 11, 12};
-    std::array<VkBuffer, 12> buffers = {
+    constexpr std::array<uint32_t, 13> bindings = {
+        0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+    std::array<VkBuffer, 13> buffers = {
         positionsBuf_, velocitiesBuf_, predictedBuf_,  densitiesBuf_,
         paramsBuf_,    keysBuf_,       indicesBuf_,    startBuf_,
-        sortedPosBuf_, sortedVelBuf_,  sortedPredBuf_, interactionBuf_};
-    std::array<VkDescriptorBufferInfo, 12> infos{};
-    std::array<VkWriteDescriptorSet, 12> writes{};
+        sortedPosBuf_, sortedVelBuf_,  sortedPredBuf_, interactionBuf_,
+        endBuf_};
+    std::array<VkDescriptorBufferInfo, 13> infos{};
+    std::array<VkWriteDescriptorSet, 13> writes{};
     for (size_t i = 0; i < bindings.size(); ++i) {
       infos[i] = {buffers[i], 0, VK_WHOLE_SIZE};
       writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -1882,6 +1898,7 @@ private:
     fluidExtent_.height = std::max(
         1u, static_cast<uint32_t>(std::lround(swapchainExtent_.height *
                                               activeRenderScale_)));
+    waterShadowValid_ = false;
     createImage2D(fluidDepthFormat_,
                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                       VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -2526,6 +2543,13 @@ private:
     shadowDp.camUp = float4(lightUp, 0);
     shadowDp.params = dp.params;
 
+    const int shadowInterval =
+        std::max(fluidSettings_.shadowUpdateInterval, 1);
+    const bool updateWaterShadow =
+        !waterShadowValid_ || (renderedFrameCount_ % shadowInterval == 0) ||
+        std::abs(fluidSettings_.sunAzimuthDegrees - shadowSunAzimuth_) > 0.01f ||
+        std::abs(fluidSettings_.sunElevationDegrees - shadowSunElevation_) > 0.01f;
+    if (updateWaterShadow) {
     std::array<VkClearValue, 2> shadowDepthClears{};
     shadowDepthClears[0].color = {{1.0e4f, 0, 0, 0}};
     shadowDepthClears[1].depthStencil = {1.0f, 0};
@@ -2579,6 +2603,10 @@ private:
       vkCmdDraw(cmd, 4, numParticles_, 0, 0);
     vkCmdEndRenderPass(cmd);
     colorToSampledBarrier(cmd, waterShadowImage_);
+    waterShadowValid_ = true;
+    shadowSunAzimuth_ = fluidSettings_.sunAzimuthDegrees;
+    shadowSunElevation_ = fluidSettings_.sunElevationDegrees;
+    }
 
     // Render the environment background first so the water shader can
     // refract against it in screen space.

@@ -19,8 +19,8 @@ layout(std140, binding = 5) uniform Params {
   float epsilon;
   uvec4 grid;
 } P;
-layout(std430, binding = 6) readonly buffer SpatialKeys { uint spatialKeys[]; };
 layout(std430, binding = 8) readonly buffer StartIndices { uint startIndices[]; };
+layout(std430, binding = 13) readonly buffer EndIndices { uint endIndices[]; };
 layout(std430, binding = 11) readonly buffer SortedPred { vec4 sortedPred[]; };
 
 ivec3 gridCell(vec3 p) {
@@ -55,7 +55,8 @@ void main() {
     uint key = uint(centerKey + dz * sliceStride + dy * rowStride + dx);
     uint start = startIndices[key];
     if (start == 0xffffffffu) continue;
-    for (uint e = start; e < P.numParticles && spatialKeys[e] == key; ++e) {
+    uint end = endIndices[key];
+    for (uint e = start; e < end; ++e) {
       vec3 offset = sortedPred[e].xyz - pi;
       float dst2 = dot(offset, offset);
       if (dst2 < h2) {
