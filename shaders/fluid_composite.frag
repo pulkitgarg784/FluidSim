@@ -13,6 +13,7 @@ layout(push_constant) uniform PC {
     vec4 camForward;
     // x = refraction scale, y = absorption scale, z = base reflectance
     vec4 material;
+    vec4 extinction;
 } pc;
 
 layout(location = 0) out vec4 outColor;
@@ -115,8 +116,7 @@ void main() {
     float thickness = texture(fluidThickness, vUV).r;
 
     // beer lambert
-    vec3 sigmaA = vec3(0.55, 0.25, 0.05);
-    vec3 transmittance = exp(-sigmaA * thickness * pc.material.y);
+    vec3 transmittance = exp(-pc.extinction.rgb * thickness * pc.material.y);
 
     // Dark, blue-leaning water body color for deeper regions.
     vec3 waterBody = vec3(0.015, 0.045, 0.085);

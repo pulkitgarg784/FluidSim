@@ -162,20 +162,35 @@ int main(int argc, char **argv) {
   constexpr int height = 768;
 
   uint32_t particleCount = sph::maxParticles;
-  if (argc > 1) {
-    if (argc != 3 || std::string(argv[1]) != "--particles") {
-      std::fprintf(stderr, "Usage: %s [--particles 1..%d]\n", argv[0],
-                   sph::maxParticles);
-      return 1;
-    }
+  std::string scenePath = "media/fluid_container.obj";
+  float sceneScale = 1.0f;
+  for (int arg = 1; arg < argc; ++arg) {
+    std::string flag = argv[arg];
+    if (flag == "--particles" && arg + 1 < argc) {
+      ++arg;
     try {
-      unsigned long requested = std::stoul(argv[2]);
+      unsigned long requested = std::stoul(argv[arg]);
       if (requested == 0 || requested > (unsigned long)sph::maxParticles)
         throw std::out_of_range("particle count");
       particleCount = static_cast<uint32_t>(requested);
     } catch (const std::exception &) {
       std::fprintf(stderr, "Particle count must be between 1 and %d\n",
                    sph::maxParticles);
+      return 1;
+    }
+    } else if (flag == "--scene" && arg + 1 < argc) {
+      scenePath = argv[++arg];
+    } else if (flag == "--scene-scale" && arg + 1 < argc) {
+      try {
+        sceneScale = std::stof(argv[++arg]);
+        if (sceneScale <= 0.0f)
+          throw std::out_of_range("scene scale");
+      } catch (const std::exception &) {
+        std::fprintf(stderr, "Scene scale must be positive\n");
+        return 1;
+      }
+    } else {
+      std::fprintf(stderr, "Usage: %s [--particles 1..%d] [--scene mesh.obj] [--scene-scale positive]\n", argv[0], sph::maxParticles);
       return 1;
     }
   }
@@ -203,6 +218,8 @@ int main(int argc, char **argv) {
   vkr::VulkanRenderer renderer;
   try {
     renderer.init(width, height, "CS488 Final Project", particleCount);
+    if (!scenePath.empty())
+      renderer.loadSceneMesh(scenePath, sceneScale);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "Renderer init failed: %s\n", e.what());
     return 1;

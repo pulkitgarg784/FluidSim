@@ -50,6 +50,7 @@ set(SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene_mesh.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene_mesh.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_blur.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_thickness_blur.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_composite.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_external.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_reorder.comp
@@ -82,6 +83,7 @@ target_include_directories(CS488 PRIVATE
     ${Vulkan_INCLUDE_DIRS})
 
 target_compile_definitions(CS488 PRIVATE
-    SHADER_DIR="${SHADER_OUT_DIR}")
+    SHADER_DIR="${SHADER_OUT_DIR}"
+    ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 target_link_libraries(CS488 PRIVATE Vulkan::Vulkan imgui)

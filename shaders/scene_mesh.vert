@@ -15,7 +15,7 @@ layout(location = 2) out float vLinearDepth;
 void main() {
     vec4 viewPos = pc.view * vec4(inPosition, 1.0);
     gl_Position = pc.proj * viewPos;
-    vNormal = mat3(pc.view) * inNormal;
+    vNormal = inNormal;
     vWorldPos = inPosition;
     vLinearDepth = -viewPos.z;
 }
