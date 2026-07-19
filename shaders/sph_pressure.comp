@@ -2,6 +2,9 @@
 layout(local_size_x = 256) in;
 
 layout(std430, binding = 3) readonly buffer Densities { float densities[]; };
+// Reuse the unsorted predicted-position buffer as pressure/viscosity output;
+// sortedPred already owns the positions needed by this stage.
+layout(std430, binding = 2) writeonly buffer ForceVelocity { vec4 forceVelocity[]; };
 layout(std140, binding = 5) uniform Params {
   vec4 gravity;
   vec4 boundsSize;
@@ -21,7 +24,7 @@ layout(std140, binding = 5) uniform Params {
 } P;
 layout(std430, binding = 6) readonly buffer SpatialKeys { uint spatialKeys[]; };
 layout(std430, binding = 8) readonly buffer StartIndices { uint startIndices[]; };
-layout(std430, binding = 10) buffer SortedVel { vec4 sortedVel[]; };
+layout(std430, binding = 10) readonly buffer SortedVel { vec4 sortedVel[]; };
 layout(std430, binding = 11) readonly buffer SortedPred { vec4 sortedPred[]; };
 
 ivec3 gridCell(vec3 p) {
@@ -30,9 +33,6 @@ ivec3 gridCell(vec3 p) {
 }
 uint cellKey(ivec3 c) {
   return (uint(c.z) * P.grid.y + uint(c.y)) * P.grid.x + uint(c.x);
-}
-bool validCell(ivec3 c) {
-  return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, ivec3(P.grid.xyz)));
 }
 float pressureFromDensity(float d) {
   return (d - P.targetDensity) * P.pressureMultiplier;
@@ -52,19 +52,28 @@ void main() {
   if (idx >= P.numParticles) return;
 
   vec3 pi = sortedPred[idx].xyz;
+  vec3 vi = sortedVel[idx].xyz;
   float di = max(densities[idx], P.epsilon);
   float pressureI = pressureFromDensity(di);
   float h = P.smoothingRadius;
   float h2 = h * h;
   ivec3 center = gridCell(pi);
+  int rowStride = int(P.grid.x);
+  int sliceStride = rowStride * int(P.grid.y);
+  int centerKey = int(cellKey(center));
+  int x0 = max(-1, -center.x);
+  int y0 = max(-1, -center.y);
+  int z0 = max(-1, -center.z);
+  int x1 = min(1, int(P.grid.x) - 1 - center.x);
+  int y1 = min(1, int(P.grid.y) - 1 - center.y);
+  int z1 = min(1, int(P.grid.z) - 1 - center.z);
   vec3 force = vec3(0.0);
+  vec3 viscosity = vec3(0.0);
 
-  for (int dz = -1; dz <= 1; ++dz)
-  for (int dy = -1; dy <= 1; ++dy)
-  for (int dx = -1; dx <= 1; ++dx) {
-    ivec3 cell = center + ivec3(dx, dy, dz);
-    if (!validCell(cell)) continue;
-    uint key = cellKey(cell);
+  for (int dz = z0; dz <= z1; ++dz)
+  for (int dy = y0; dy <= y1; ++dy)
+  for (int dx = x0; dx <= x1; ++dx) {
+    uint key = uint(centerKey + dz * sliceStride + dy * rowStride + dx);
     uint start = startIndices[key];
     if (start == 0xffffffffu) continue;
     for (uint e = start; e < P.numParticles && spatialKeys[e] == key; ++e) {
@@ -79,9 +88,13 @@ void main() {
       float sharedPressure = 0.5 * (pressureFromDensity(dj) + pressureI);
       float slope = (dst - h) * P.spikyPow2GradScale;
       force += sharedPressure * dir * slope * P.particleMass / dj;
+      float kernel = h2 - dst2;
+      float influence = kernel * kernel * kernel * P.poly6Scale;
+      viscosity += (sortedVel[e].xyz - vi) * influence;
     }
   }
 
-  vec3 velocity = sortedVel[idx].xyz + (force / di) * P.deltaT;
-  sortedVel[idx] = vec4(velocity, 0.0);
+  vec3 velocity = vi + (force / di) * P.deltaT +
+                  viscosity * P.viscosityStrength * P.deltaT;
+  forceVelocity[idx] = vec4(velocity, 0.0);
 }

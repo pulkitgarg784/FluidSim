@@ -13,6 +13,11 @@ layout(push_constant) uniform PC {
 layout(location = 0) out float outThickness;
 
 void main() {
+    float center = texture(src, vUV).r;
+    if (center <= 1.0e-6) {
+        outThickness = 0.0;
+        return;
+    }
     ivec2 size = textureSize(src, 0);
     vec2 texel = 1.0 / vec2(size);
     int radius = clamp(int(round(pc.maxScreenSpaceRadius * 0.35)), 1, 5);

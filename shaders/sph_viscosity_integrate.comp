@@ -3,6 +3,7 @@ layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) buffer Positions { vec4 positions[]; };
 layout(std430, binding = 1) buffer Velocities { vec4 velocities[]; };
+layout(std430, binding = 2) readonly buffer ForceVelocity { vec4 forceVelocity[]; };
 layout(std140, binding = 5) uniform Params {
   vec4 gravity; vec4 boundsSize;
   float deltaT; float smoothingRadius; float particleMass; float targetDensity;
@@ -10,59 +11,12 @@ layout(std140, binding = 5) uniform Params {
   float spikyPow2Scale; float spikyPow2GradScale; float poly6Scale;
   uint numParticles; float epsilon; uvec4 grid;
 } P;
-layout(std430, binding = 6) readonly buffer SpatialKeys { uint spatialKeys[]; };
-layout(std430, binding = 8) readonly buffer StartIndices { uint startIndices[]; };
 layout(std430, binding = 9) readonly buffer SortedPos { vec4 sortedPos[]; };
-layout(std430, binding = 10) readonly buffer SortedVel { vec4 sortedVel[]; };
-layout(std430, binding = 11) readonly buffer SortedPred { vec4 sortedPred[]; };
-
-ivec3 gridCell(vec3 p) {
-  ivec3 c = ivec3(floor((p + 0.5 * P.boundsSize.xyz) / P.smoothingRadius)) + ivec3(1);
-  return clamp(c, ivec3(0), ivec3(P.grid.xyz) - ivec3(1));
-}
-uint cellKey(ivec3 c) {
-  return (uint(c.z) * P.grid.y + uint(c.y)) * P.grid.x + uint(c.x);
-}
-bool validCell(ivec3 c) {
-  return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, ivec3(P.grid.xyz)));
-}
-
 void main() {
   uint idx = gl_GlobalInvocationID.x;
   if (idx >= P.numParticles) return;
 
-  vec3 pi = sortedPred[idx].xyz;
-  vec3 vi = sortedVel[idx].xyz;
-  float h2 = P.smoothingRadius * P.smoothingRadius;
-  ivec3 center = gridCell(pi);
-  vec3 viscosity = vec3(0.0);
-
-  for (int dz = -1; dz <= 1; ++dz)
-  for (int dy = -1; dy <= 1; ++dy)
-  for (int dx = -1; dx <= 1; ++dx) {
-    ivec3 cell = center + ivec3(dx, dy, dz);
-    if (!validCell(cell)) continue;
-    uint key = cellKey(cell);
-    uint start = startIndices[key];
-    if (start == 0xffffffffu) continue;
-    for (uint e = start; e < P.numParticles && spatialKeys[e] == key; ++e) {
-      if (e == idx) continue;
-      vec3 offset = sortedPred[e].xyz - pi;
-      float dst2 = dot(offset, offset);
-      if (dst2 >= h2) continue;
-      float v = h2 - dst2;
-      float influence = v * v * v * P.poly6Scale;
-      viscosity += (sortedVel[e].xyz - vi) * influence;
-    }
-  }
-
-  vec3 velocity = vi + viscosity * P.viscosityStrength * P.deltaT;
-
-  // displacement-based max speed (h / dt) currently commetned out
-  // float maxSpeed = 24.0;
-  float speed2 = dot(velocity, velocity);
-  // if (speed2 > maxSpeed * maxSpeed)
-  //   velocity *= maxSpeed * inversesqrt(speed2);
+  vec3 velocity = forceVelocity[idx].xyz;
 
   vec3 position = sortedPos[idx].xyz + velocity * P.deltaT;
   vec3 halfBounds = 0.5 * P.boundsSize.xyz;
