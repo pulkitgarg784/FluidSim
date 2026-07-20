@@ -103,6 +103,15 @@ struct DepthPush {
   float4 params; // x = particle radius
 };
 
+struct BlurPush {
+  float dir[2];
+  float depthDifferenceStrength;
+  float maxScreenSpaceRadius;
+  float strength;
+  float particleRadius;
+  float fillSilhouette;
+};
+
 struct WaterPush {
   float4 camRight;
   float4 camUp;
@@ -129,9 +138,9 @@ struct SceneLightingParams {
 
 struct FluidRenderSettings {
   float renderScale = 0.75f;
-  float maxBlurRadius = 8.0f;
-  float blurStrength = 1.0f;
-  float depthDifferenceStrength = 50.0f;
+  float maxBlurRadius = 12.0f;
+  float blurStrength = 1.25f;
+  float depthDifferenceStrength = 20.0f;
   int blurIterations = 1;
   float refractionStrength = 0.10f;
   float absorptionScale = 1.1f;
@@ -2688,6 +2697,9 @@ private:
     vkCmdEndRenderPass(cmd);
     colorToSampledBarrier(cmd, fluidThicknessImage_);
 
+    DepthPush surfaceDp = dp;
+    surfaceDp.params.x *= 1.35f;
+
     // Render spheres to depth target
     std::array<VkClearValue, 2> depthClears{};
     depthClears[0].color = {{1.0e4f, 0.0f, 0.0f, 0.0f}}; // "empty" depth
@@ -2706,7 +2718,7 @@ private:
     vkCmdPushConstants(cmd, depthPipelineLayout_,
                        VK_SHADER_STAGE_VERTEX_BIT |
                            VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(DepthPush), &dp);
+                       0, sizeof(DepthPush), &surfaceDp);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             depthPipelineLayout_, 0, 1, &descriptorSet_, 0,
                             nullptr);
@@ -2720,7 +2732,7 @@ private:
 
     // Bilateral blur using two passes
     auto blurPass = [&](VkFramebuffer fb, VkDescriptorSet src, float dx,
-                        float dy) {
+                        float dy, bool fillSilhouette) {
       VkRenderPassBeginInfo brp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
       brp.renderPass = blurPass_;
       brp.framebuffer = fb;
@@ -2731,14 +2743,14 @@ private:
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline_);
       vkCmdSetViewport(cmd, 0, 1, &fluidViewport);
       vkCmdSetScissor(cmd, 0, 1, &fluidScissor);
-      float bpc[5] = {
-          dx,
-          dy,
-          fluidSettings_.depthDifferenceStrength,
-          fluidSettings_.maxBlurRadius * activeRenderScale_,
-          fluidSettings_.blurStrength};
+      BlurPush bpc{{dx, dy},
+                   fluidSettings_.depthDifferenceStrength,
+                   fluidSettings_.maxBlurRadius * activeRenderScale_,
+                   fluidSettings_.blurStrength,
+                   surfaceDp.params.x,
+                   fillSilhouette ? 1.0f : 0.0f};
       vkCmdPushConstants(cmd, blurPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
-                         0, sizeof(bpc), bpc);
+                         0, sizeof(bpc), &bpc);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                               blurPipelineLayout_, 0, 1, &src, 0, nullptr);
       vkCmdDraw(cmd, 3, 1, 0, 0);
@@ -2748,9 +2760,10 @@ private:
     float invH = 1.0f / (float)fluidExtent_.height;
     for (int i = 0; i < fluidSettings_.blurIterations; ++i) {
       blurPass(blurTempFB_, i == 0 ? blurSetH_ : blurSetSmooth_, invW,
-               0.0f); // horizontal
+               0.0f, i == 0); // horizontal
       colorToSampledBarrier(cmd, blurTempImage_);
-      blurPass(blurSmoothFB_, blurSetV_, 0.0f, invH); // vertical
+      blurPass(blurSmoothFB_, blurSetV_, 0.0f, invH,
+               i == 0); // vertical
       colorToSampledBarrier(cmd, blurSmoothImage_);
     }
 
