@@ -240,6 +240,7 @@ int main(int argc, char **argv) {
   params.gravity[0] = sph::gravity.x;
   params.gravity[1] = sph::gravity.y;
   params.gravity[2] = sph::gravity.z;
+  params.gravity[3] = sph::tensilePressureScale;
   params.boundsSize[0] = sph::boundsSize.x;
   params.boundsSize[1] = sph::boundsSize.y;
   params.boundsSize[2] = sph::boundsSize.z;

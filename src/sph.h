@@ -22,11 +22,12 @@ constexpr float3 gravity = float3(0.0f, -9.8f, 0.0f);
 
 constexpr float smoothingRadius = 0.12f * particleScale;
 constexpr float particleMass = 0.25f;
-constexpr float collisionDamping = 0.95f;    // velocity kept on a wall bounce
+constexpr float collisionDamping = 0.65f;    // velocity kept on a wall bounce
 constexpr float3 boundsSize = float3(8.77f, 2.92f, 2.92f); // simulation box extents
 constexpr float targetDensity = 2315.0f;
-constexpr float pressureMultiplier = 16.0f;  // stiffness
+constexpr float pressureMultiplier = 16.0f;
 constexpr float viscosityStrength = 0.001f;
+constexpr float tensilePressureScale = 0.05f;
 constexpr int simIterationsPerFrame = 1;
 
 constexpr float Epsilon = 5e-5f;
@@ -250,6 +251,8 @@ public:
 
   static float convertDensityToPressure(float density) {
     float densityError = density - targetDensity;
+    if (densityError < 0.0f)
+      densityError *= tensilePressureScale;
     return densityError * pressureMultiplier;
   }
 

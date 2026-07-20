@@ -32,7 +32,10 @@ uint cellKey(ivec3 c) {
   return (uint(c.z) * P.grid.y + uint(c.y)) * P.grid.x + uint(c.x);
 }
 float pressureFromDensity(float d) {
-  return (d - P.targetDensity) * P.pressureMultiplier;
+  float densityError = d - P.targetDensity;
+  if (densityError < 0.0)
+    densityError *= P.gravity.w;
+  return densityError * P.pressureMultiplier;
 }
 vec3 randomDir(uint seed) {
   seed = seed * 747796405u + 2891336453u;
@@ -64,6 +67,7 @@ void main() {
   int y1 = min(1, int(P.grid.y) - 1 - center.y);
   int z1 = min(1, int(P.grid.z) - 1 - center.z);
   vec3 force = vec3(0.0);
+  uint neighbourCount = 0u;
 
   for (int dz = z0; dz <= z1; ++dz)
   for (int dy = y0; dy <= y1; ++dy)
@@ -77,6 +81,7 @@ void main() {
       vec3 offset = sortedPred[e].xyz - pi;
       float dst2 = dot(offset, offset);
       if (dst2 >= h2) continue;
+      ++neighbourCount;
       float dst = sqrt(dst2);
       vec3 dir = (dst < P.epsilon) ? randomDir(idx * P.numParticles + e)
                                    : offset / dst;
@@ -88,5 +93,8 @@ void main() {
   }
 
   vec3 velocity = sortedVel[idx].xyz + (force / di) * P.deltaT;
+  // airborn drag
+  if (neighbourCount < 8u)
+    velocity -= velocity * (0.75 * P.deltaT);
   sortedVel[idx] = vec4(velocity, 0.0);
 }

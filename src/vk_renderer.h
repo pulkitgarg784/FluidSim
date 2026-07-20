@@ -144,7 +144,7 @@ struct FluidRenderSettings {
   float shadowAmbientLight = 0.17f;
   int shadowUpdateInterval = 2;
   int simulationSubsteps = 1;
-  float simulationRate = 4.0f;
+  float simulationRate = 10.0f;
 };
 
 inline void vkCheck(VkResult r, const char *what) {
@@ -262,12 +262,41 @@ public:
     ImGui::Text("Particles: %u", numParticles_);
     ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
     ImGui::SliderInt("Simulation substeps", &fluidSettings_.simulationSubsteps,
-                     1, 6);
+                     1, 8);
     ImGui::SliderFloat("Simulation rate", &fluidSettings_.simulationRate, 0.25f,
                        10.0f, "%.2fx", ImGuiSliderFlags_Logarithmic);
+    const int activeSubsteps = simulationSubsteps();
     float frameDt = baseDeltaT_ * fluidSettings_.simulationRate;
-    ImGui::Text("Simulation dt/frame: %.4f", frameDt);
-    ImGui::TextUnformatted("Substeps improve quality without changing speed.");
+    ImGui::Text("Simulated dt/frame: %.4f", frameDt);
+    ImGui::Text("Active substeps: %d (dt %.5f)", activeSubsteps,
+                frameDt / float(activeSubsteps));
+    if (paramsMapped_) {
+      auto *physics = reinterpret_cast<SphParams *>(paramsMapped_);
+      ImGui::Separator();
+      ImGui::TextUnformatted("Fluid physics");
+      ImGui::SliderFloat("Gravity", &physics->gravity[1], -20.0f, 0.0f,
+                         "%.2f");
+      ImGui::SliderFloat("Target density", &physics->targetDensity, 500.0f,
+                         4000.0f, "%.0f");
+      ImGui::SliderFloat("Pressure stiffness", &physics->pressureMultiplier,
+                         1.0f, 500.0f, "%.1f",
+                         ImGuiSliderFlags_Logarithmic);
+      ImGui::SliderFloat("Surface attraction", &physics->gravity[3], 0.0f,
+                         0.25f, "%.3f");
+      ImGui::SliderFloat("Viscosity", &physics->viscosityStrength, 0.0f,
+                         0.02f, "%.4f");
+      ImGui::SliderFloat("Collision damping", &physics->collisionDamping,
+                         0.0f, 1.0f, "%.2f");
+      if (ImGui::Button("Reset water preset")) {
+        physics->gravity[1] = defaultSphParams_.gravity[1];
+        physics->gravity[3] = defaultSphParams_.gravity[3];
+        physics->targetDensity = defaultSphParams_.targetDensity;
+        physics->pressureMultiplier = defaultSphParams_.pressureMultiplier;
+        physics->viscosityStrength = defaultSphParams_.viscosityStrength;
+        physics->collisionDamping = defaultSphParams_.collisionDamping;
+        fluidSettings_.simulationRate = 10.0f;
+      }
+    }
     ImGui::Separator();
     ImGui::TextUnformatted("Screen-space reconstruction");
     ImGui::SliderFloat("Render scale", &fluidSettings_.renderScale, 0.5f,
@@ -307,13 +336,16 @@ public:
     ImGui::End();
   }
 
-  int simulationSubsteps() const { return fluidSettings_.simulationSubsteps; }
+  int simulationSubsteps() const {
+    return std::max(fluidSettings_.simulationSubsteps, 1);
+  }
 
   void setParams(const SphParams &params) {
     if (params.grid[3] > startCapacity_)
       throw std::runtime_error("SPH grid exceeds start-index buffer capacity");
     gridCellCount_ = params.grid[3];
     baseDeltaT_ = params.deltaT;
+    defaultSphParams_ = params;
     std::memcpy(paramsMapped_, &params, sizeof(SphParams));
   }
 
@@ -751,6 +783,7 @@ private:
   VkBuffer paramsBuf_ = VK_NULL_HANDLE;
   VkDeviceMemory paramsMem_ = VK_NULL_HANDLE;
   void *paramsMapped_ = nullptr;
+  SphParams defaultSphParams_{};
   VkBuffer interactionBuf_ = VK_NULL_HANDLE;
   VkDeviceMemory interactionMem_ = VK_NULL_HANDLE;
   void *interactionMapped_ = nullptr;
