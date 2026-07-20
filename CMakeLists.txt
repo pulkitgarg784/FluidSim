@@ -74,7 +74,10 @@ endforeach()
 
 add_custom_target(shaders DEPENDS ${SPIRV_OUTPUTS})
 
-add_executable(CS488 src/main.cpp src/vk_radix_sort_impl.cpp)
+add_executable(CS488
+    src/main.cpp
+    src/obj_loader.cpp
+    src/vk_radix_sort_impl.cpp)
 add_dependencies(CS488 shaders)
 
 target_include_directories(CS488 PRIVATE

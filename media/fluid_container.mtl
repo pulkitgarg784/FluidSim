@@ -1,0 +1,13 @@
+# Materials for fluid_container.obj
+
+newmtl floor
+Ka 0.08 0.09 0.10
+Kd 0.19 0.21 0.23
+Ks 0.04 0.04 0.04
+Ns 16.0
+
+newmtl obstacle
+Ka 0.12 0.06 0.02
+Kd 0.42 0.20 0.08
+Ks 0.12 0.10 0.08
+Ns 32.0
