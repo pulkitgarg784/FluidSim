@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -267,14 +268,29 @@ int main(int argc, char **argv) {
 
   std::vector<float4> initPos(particleCount), initVel(particleCount);
   const float3 half = sph::boundsSize * 0.5f;
-  const float slab = sph::boundsSize.x * 0.2f;
+  const float wallPadding = 1.5f * smoothingRadius;
+  const float3 damMin(-half.x + wallPadding, -half.y + wallPadding,
+                      -half.z + wallPadding);
+  const float3 damSize(sph::boundsSize.x * 0.25f - wallPadding,
+                       sph::boundsSize.y * 0.93f - wallPadding * 2.0f,
+                       sph::boundsSize.z - wallPadding * 2.0f);
+  const float particleSpacing = std::cbrt(
+      (damSize.x * damSize.y * damSize.z) / float(particleCount));
+  const uint32_t damX = std::max(1u, uint32_t(std::ceil(damSize.x / particleSpacing)));
+  const uint32_t damZ = std::max(1u, uint32_t(std::ceil(damSize.z / particleSpacing)));
+  const uint32_t damY = std::max(
+      1u, uint32_t((uint64_t(particleCount) + uint64_t(damX) * damZ - 1u) /
+                   (uint64_t(damX) * damZ)));
+  const float3 spacing(damSize.x / float(damX), damSize.y / float(damY),
+                       damSize.z / float(damZ));
+
   for (uint32_t i = 0; i < particleCount; ++i) {
-    bool leftEdge = i < particleCount / 2u;
-    float x = leftEdge ? (-half.x + sph::PCG32::rand() * slab)
-                       : (half.x - sph::PCG32::rand() * slab);
-    float y = (sph::PCG32::rand() - 0.5f) * sph::boundsSize.y;
-    float z = (sph::PCG32::rand() - 0.5f) * sph::boundsSize.z;
-    initPos[i] = float4(x, y, z, 0.0f);
+    const uint32_t xIndex = i % damX;
+    const uint32_t zIndex = (i / damX) % damZ;
+    const uint32_t yIndex = i / (damX * damZ);
+    const float3 p = damMin + spacing *
+        (float3(float(xIndex), float(yIndex), float(zIndex)) + 0.5f);
+    initPos[i] = float4(p.x, p.y, p.z, 0.0f);
     initVel[i] = float4(0.0f);
   }
   renderer.uploadInitialState(initPos, initVel);

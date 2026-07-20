@@ -22,8 +22,8 @@ constexpr float3 gravity = float3(0.0f, -9.8f, 0.0f);
 
 constexpr float smoothingRadius = 0.12f * particleScale;
 constexpr float particleMass = 0.25f;
-constexpr float collisionDamping = 0.65f;    // velocity kept on a wall bounce
-constexpr float3 boundsSize = float3(8.77f, 2.92f, 2.92f); // simulation box extents
+constexpr float collisionDamping = 0.95f;    // velocity kept on a wall bounce
+constexpr float3 boundsSize = float3(8.77f, 4.20f, 2.92f); // simulation box extents
 constexpr float targetDensity = 2315.0f;
 constexpr float pressureMultiplier = 16.0f;
 constexpr float viscosityStrength = 0.001f;
@@ -102,15 +102,29 @@ public:
     startIndices.assign(numParticles, UINT32_MAX);
 
     const float3 half = boundsSize * 0.5f;
-    const float slab = boundsSize.x * 0.2f; // slab thickness at each end
+    const float wallPadding = 1.5f * smoothingRadius;
+    const float3 damMin(-half.x + wallPadding, -half.y + wallPadding,
+                        -half.z + wallPadding);
+    const float3 damSize(boundsSize.x * 0.25f - wallPadding,
+                         boundsSize.y * 0.93f - wallPadding * 2.0f,
+                         boundsSize.z - wallPadding * 2.0f);
+    const float particleSpacing =
+        std::cbrt((damSize.x * damSize.y * damSize.z) / float(numParticles));
+    const uint32_t damX = std::max(1u, uint32_t(std::ceil(damSize.x / particleSpacing)));
+    const uint32_t damZ = std::max(1u, uint32_t(std::ceil(damSize.z / particleSpacing)));
+    const uint32_t damY = std::max(
+        1u, uint32_t((uint64_t(numParticles) + uint64_t(damX) * damZ - 1u) /
+                     (uint64_t(damX) * damZ)));
+    const float3 spacing(damSize.x / float(damX), damSize.y / float(damY),
+                         damSize.z / float(damZ));
     for (int i = 0; i < numParticles; i++) {
       Particle &p = particles[i];
-      const bool leftEdge = (i < numParticles / 2);
-      const float x = leftEdge ? (-half.x + PCG32::rand() * slab)
-                               : (half.x - PCG32::rand() * slab);
-      const float y = (PCG32::rand() - 0.5f) * boundsSize.y;
-      const float z = (PCG32::rand() - 0.5f) * boundsSize.z;
-      p.position = float3(x, y, z);
+      const uint32_t index = uint32_t(i);
+      const uint32_t xIndex = index % damX;
+      const uint32_t zIndex = (index / damX) % damZ;
+      const uint32_t yIndex = index / (damX * damZ);
+      p.position = damMin + spacing *
+          (float3(float(xIndex), float(yIndex), float(zIndex)) + 0.5f);
       p.velocity = float3(0.0f);
       p.predictedPosition = p.position;
       p.force = float3(0.0f);
