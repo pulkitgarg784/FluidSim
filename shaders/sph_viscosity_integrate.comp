@@ -1,0 +1,76 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer Positions { vec4 positions[]; };
+layout(std430, binding = 1) buffer Velocities { vec4 velocities[]; };
+layout(std140, binding = 5) uniform Params {
+  vec4 gravity; vec4 boundsSize;
+  float deltaT; float smoothingRadius; float particleMass; float targetDensity;
+  float pressureMultiplier; float viscosityStrength; float collisionDamping;
+  float spikyPow2Scale; float spikyPow2GradScale; float poly6Scale;
+  uint numParticles; float epsilon; uvec4 grid;
+} P;
+layout(std430, binding = 9) readonly buffer SortedPos { vec4 sortedPos[]; };
+layout(std430, binding = 8) readonly buffer StartIndices { uint startIndices[]; };
+layout(std430, binding = 10) readonly buffer SortedVel { vec4 sortedVel[]; };
+layout(std430, binding = 11) readonly buffer SortedPred { vec4 sortedPred[]; };
+layout(std430, binding = 13) readonly buffer EndIndices { uint endIndices[]; };
+
+ivec3 gridCell(vec3 p) {
+  ivec3 c = ivec3(floor((p + 0.5 * P.boundsSize.xyz) / P.smoothingRadius)) + ivec3(1);
+  return clamp(c, ivec3(0), ivec3(P.grid.xyz) - ivec3(1));
+}
+uint cellKey(ivec3 c) {
+  return (uint(c.z) * P.grid.y + uint(c.y)) * P.grid.x + uint(c.x);
+}
+void main() {
+  uint idx = gl_GlobalInvocationID.x;
+  if (idx >= P.numParticles) return;
+
+  vec3 pi = sortedPred[idx].xyz;
+  vec3 vi = sortedVel[idx].xyz;
+  float h2 = P.smoothingRadius * P.smoothingRadius;
+  ivec3 center = gridCell(pi);
+  int rowStride = int(P.grid.x);
+  int sliceStride = rowStride * int(P.grid.y);
+  int centerKey = int(cellKey(center));
+  int x0 = max(-1, -center.x);
+  int y0 = max(-1, -center.y);
+  int z0 = max(-1, -center.z);
+  int x1 = min(1, int(P.grid.x) - 1 - center.x);
+  int y1 = min(1, int(P.grid.y) - 1 - center.y);
+  int z1 = min(1, int(P.grid.z) - 1 - center.z);
+  vec3 viscosity = vec3(0.0);
+
+  for (int dz = z0; dz <= z1; ++dz)
+  for (int dy = y0; dy <= y1; ++dy)
+  for (int dx = x0; dx <= x1; ++dx) {
+    uint key = uint(centerKey + dz * sliceStride + dy * rowStride + dx);
+    uint start = startIndices[key];
+    if (start == 0xffffffffu) continue;
+    uint end = endIndices[key];
+    for (uint e = start; e < end; ++e) {
+      if (e == idx) continue;
+      vec3 offset = sortedPred[e].xyz - pi;
+      float dst2 = dot(offset, offset);
+      if (dst2 >= h2) continue;
+      float v = h2 - dst2;
+      float influence = v * v * v * P.poly6Scale;
+      viscosity += (sortedVel[e].xyz - vi) * influence;
+    }
+  }
+
+  vec3 velocity = vi + viscosity * P.viscosityStrength * P.deltaT;
+
+  vec3 position = sortedPos[idx].xyz + velocity * P.deltaT;
+  vec3 halfBounds = 0.5 * P.boundsSize.xyz;
+  for (int axis = 0; axis < 3; ++axis) {
+    if (abs(position[axis]) > halfBounds[axis]) {
+      position[axis] = halfBounds[axis] * sign(position[axis]);
+      velocity[axis] *= -P.collisionDamping;
+    }
+  }
+
+  positions[idx] = vec4(position, 0.0);
+  velocities[idx] = vec4(velocity, 0.0);
+}
