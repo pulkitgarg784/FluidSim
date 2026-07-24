@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <iostream>
@@ -39,8 +38,6 @@ static double m_mouseY = 0.0;
 static void keyFunc(GLFWwindow *window, int key, int, int action, int) {
   if (action == GLFW_PRESS && key == GLFW_KEY_ESCAPE)
     glfwSetWindowShouldClose(window, GLFW_TRUE);
-  if (ImGui::GetIO().WantCaptureKeyboard)
-    return;
 }
 
 static void processKeyboard(GLFWwindow *w, float dt) {
@@ -168,16 +165,17 @@ int main(int argc, char **argv) {
     std::string flag = argv[arg];
     if (flag == "--particles" && arg + 1 < argc) {
       ++arg;
-    try {
-      unsigned long requested = std::stoul(argv[arg]);
-      if (requested == 0 || requested > (unsigned long)sph::maxParticles)
-        throw std::out_of_range("particle count");
-      particleCount = static_cast<uint32_t>(requested);
-    } catch (const std::exception &) {
-      std::fprintf(stderr, "Particle count must be between 1 and %d\n",
-                   sph::maxParticles);
-      return 1;
-    }
+      try {
+        unsigned long requested = std::stoul(argv[arg]);
+        if (requested == 0 ||
+            requested > static_cast<unsigned long>(sph::maxParticles))
+          throw std::out_of_range("particle count");
+        particleCount = static_cast<uint32_t>(requested);
+      } catch (const std::exception &) {
+        std::fprintf(stderr, "Particle count must be between 1 and %d\n",
+                     sph::maxParticles);
+        return 1;
+      }
     } else if (flag == "--scene" && arg + 1 < argc) {
       scenePath = argv[++arg];
     } else if (flag == "--scene-scale" && arg + 1 < argc) {
@@ -190,7 +188,10 @@ int main(int argc, char **argv) {
         return 1;
       }
     } else {
-      std::fprintf(stderr, "Usage: %s [--particles 1..%d] [--scene mesh.obj] [--scene-scale positive]\n", argv[0], sph::maxParticles);
+      std::fprintf(stderr,
+                   "Usage: %s [--particles 1..%d] [--scene mesh.obj] "
+                   "[--scene-scale positive]\n",
+                   argv[0], sph::maxParticles);
       return 1;
     }
   }
@@ -232,6 +233,7 @@ int main(int argc, char **argv) {
   try {
     renderer.initImGui();
   } catch (const std::exception &e) {
+    std::fprintf(stderr, "ImGui init failed: %s\n", e.what());
     renderer.cleanup();
     return 1;
   }
@@ -266,45 +268,43 @@ int main(int argc, char **argv) {
   params.grid[3] = static_cast<uint32_t>(gridCells64);
   renderer.setParams(params);
 
-  std::vector<float4> initPos(particleCount), initVel(particleCount);
-  const float3 half = sph::boundsSize * 0.5f;
-  const float wallPadding = 1.5f * smoothingRadius;
-  const float3 damMin(-half.x + wallPadding, -half.y + wallPadding,
-                      -half.z + wallPadding);
-  const float3 damSize(sph::boundsSize.x * 0.25f - wallPadding,
-                       sph::boundsSize.y * 0.93f - wallPadding * 2.0f,
-                       sph::boundsSize.z - wallPadding * 2.0f);
-  const float particleSpacing = std::cbrt(
-      (damSize.x * damSize.y * damSize.z) / float(particleCount));
-  const uint32_t damX = std::max(1u, uint32_t(std::ceil(damSize.x / particleSpacing)));
-  const uint32_t damZ = std::max(1u, uint32_t(std::ceil(damSize.z / particleSpacing)));
-  const uint32_t damY = std::max(
-      1u, uint32_t((uint64_t(particleCount) + uint64_t(damX) * damZ - 1u) /
-                   (uint64_t(damX) * damZ)));
-  const float3 spacing(damSize.x / float(damX), damSize.y / float(damY),
-                       damSize.z / float(damZ));
+  {
+    std::vector<float4> initialPositions(particleCount);
+    std::vector<float4> initialVelocities(particleCount);
+    const float3 half = sph::boundsSize * 0.5f;
+    const float wallPadding = 1.5f * smoothingRadius;
+    const float3 damMin(-half.x + wallPadding, -half.y + wallPadding,
+                        -half.z + wallPadding);
+    const float3 damSize(sph::boundsSize.x * 0.25f - wallPadding,
+                         sph::boundsSize.y * 0.93f - wallPadding * 2.0f,
+                         sph::boundsSize.z - wallPadding * 2.0f);
+    const float particleSpacing = std::cbrt(
+        (damSize.x * damSize.y * damSize.z) / float(particleCount));
+    const uint32_t damX =
+        std::max(1u, uint32_t(std::ceil(damSize.x / particleSpacing)));
+    const uint32_t damZ =
+        std::max(1u, uint32_t(std::ceil(damSize.z / particleSpacing)));
+    const uint32_t damY = std::max(
+        1u, uint32_t((uint64_t(particleCount) + uint64_t(damX) * damZ - 1u) /
+                     (uint64_t(damX) * damZ)));
+    const float3 spacing(damSize.x / float(damX), damSize.y / float(damY),
+                         damSize.z / float(damZ));
 
-  for (uint32_t i = 0; i < particleCount; ++i) {
-    const uint32_t xIndex = i % damX;
-    const uint32_t zIndex = (i / damX) % damZ;
-    const uint32_t yIndex = i / (damX * damZ);
-    const float3 p = damMin + spacing *
-        (float3(float(xIndex), float(yIndex), float(zIndex)) + 0.5f);
-    initPos[i] = float4(p.x, p.y, p.z, 0.0f);
-    initVel[i] = float4(0.0f);
+    for (uint32_t i = 0; i < particleCount; ++i) {
+      const uint32_t xIndex = i % damX;
+      const uint32_t zIndex = (i / damX) % damZ;
+      const uint32_t yIndex = i / (damX * damZ);
+      const float3 p =
+          damMin + spacing *
+                       (float3(float(xIndex), float(yIndex), float(zIndex)) +
+                        0.5f);
+      initialPositions[i] = float4(p.x, p.y, p.z, 0.0f);
+      initialVelocities[i] = float4(0.0f);
+    }
+    renderer.uploadInitialState(initialPositions, initialVelocities);
   }
-  renderer.uploadInitialState(initPos, initVel);
-  initPos.clear();
-  initVel.clear();
-  initPos.shrink_to_fit();
-  initVel.shrink_to_fit();
 
   double lastTime = glfwGetTime();
-
-  // FPS counter variables
-  auto fpsStartTime = std::chrono::high_resolution_clock::now();
-  uint64_t frameCount = 0;
-  double fps = 0.0;
 
   try {
     while (!renderer.shouldClose()) {
@@ -320,8 +320,6 @@ int main(int argc, char **argv) {
       globalRight = normalize(cross(globalViewDir, globalUp));
 
       processKeyboard(win, dt);
-      globalViewDir = normalize(globalLookat - globalEye);
-      globalRight = normalize(cross(globalViewDir, globalUp));
 
       const float3 camUp = cross(globalRight, globalViewDir);
 
@@ -362,26 +360,10 @@ int main(int argc, char **argv) {
       renderer.setInteraction(interactionPoint, interactionRadius,
                               interactionStrengthSigned);
 
-      // the simulation now runs entirely on the GPU inside drawFrame
+      const int substeps = renderer.simulationSubsteps();
       renderer.drawFrame(view, proj, globalRight, camUp, globalViewDir,
-             renderRadius, renderer.simulationSubsteps());
-
-      // Update FPS counter
-      frameCount++;
-      auto currentTime = std::chrono::high_resolution_clock::now();
-      auto elapsed = std::chrono::duration<double>(currentTime - fpsStartTime).count();
-      
-      // Update and print FPS every second
-      if (elapsed >= 1.0) {
-        fps = frameCount / elapsed;
-        frameCount = 0;
-        fpsStartTime = currentTime;
-        std::cout << "FPS: " << fps << " (" << particleCount
-                  << " particles, " << renderer.simulationSubsteps()
-                  << " substeps)" << std::endl;
-      }
+                         renderRadius, substeps);
     }
-    renderer.waitIdle();
   } catch (const std::exception &e) {
     std::fprintf(stderr, "Runtime error: %s\n", e.what());
     renderer.cleanup();

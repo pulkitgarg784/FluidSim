@@ -39,25 +39,6 @@ void stbi_image_free(void *retval_from_stbi_load);
 #define ASSET_DIR "."
 #endif
 
-// OS detection macros
-#if defined(__APPLE__)
-#define VKR_OS_MACOS 1
-#define VKR_OS_LINUX 0
-#define VKR_OS_WINDOWS 0
-#elif defined(__linux__)
-#define VKR_OS_MACOS 0
-#define VKR_OS_LINUX 1
-#define VKR_OS_WINDOWS 0
-#elif defined(_WIN32)
-#define VKR_OS_MACOS 0
-#define VKR_OS_LINUX 0
-#define VKR_OS_WINDOWS 1
-#else
-#define VKR_OS_MACOS 0
-#define VKR_OS_LINUX 0
-#define VKR_OS_WINDOWS 0
-#endif
-
 namespace vkr {
 
 // SPH parameter block
@@ -80,15 +61,6 @@ struct SphParams {
 };
 static_assert(sizeof(SphParams) == 96,
               "SphParams must match the std140 shader block");
-
-// Push-constant block
-// has to match particle.vert
-struct PushConstants {
-  float4x4 viewProj;
-  float4 camRight;
-  float4 camUp;
-  float4 params; // (x = particle radius)
-};
 
 struct InteractionParams {
   float point[4];
@@ -201,7 +173,6 @@ public:
     createSceneLightingBuffer();
     createSorter();
     createComputeDescriptors();
-    createGraphicsPipeline();
     createComputePipelines();
     createQuadVertexBuffer();
     createEnvironmentTexture();
@@ -232,7 +203,6 @@ public:
   }
   bool shouldClose() const { return glfwWindowShouldClose(window_); }
   void pollEvents() const { glfwPollEvents(); }
-  void waitIdle() const { vkDeviceWaitIdle(device_); }
 
   void initImGui() {
     if (imguiInitialized_)
@@ -501,11 +471,6 @@ public:
         vkDestroyPipeline(device_, p, nullptr);
     if (computePipelineLayout_)
       vkDestroyPipelineLayout(device_, computePipelineLayout_, nullptr);
-    if (pipeline_)
-      vkDestroyPipeline(device_, pipeline_, nullptr);
-    if (pipelineLayout_)
-      vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
-
     // fluid rendering
     if (compositePipeline_)
       vkDestroyPipeline(device_, compositePipeline_, nullptr);
@@ -649,9 +614,6 @@ private:
   VkFormat depthFormat_ = VK_FORMAT_D32_SFLOAT;
 
   VkRenderPass renderPass_ = VK_NULL_HANDLE;
-  VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
-  VkPipeline pipeline_ = VK_NULL_HANDLE;
-
   VkFormat fluidDepthFormat_ = VK_FORMAT_R32_SFLOAT;
   VkExtent2D fluidExtent_{};
   float activeRenderScale_ = 0.0f;
@@ -821,14 +783,14 @@ private:
     std::vector<const char *> extensions(glfwExts, glfwExts + glfwExtCount);
 
 // MoltenVK / portability extensions (macOS only)
-#if VKR_OS_MACOS
+#if defined(__APPLE__)
     extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
     extensions.push_back(
         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 #endif
 
     VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-#if VKR_OS_MACOS
+#if defined(__APPLE__)
     ci.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 #endif
     ci.pApplicationInfo = &app;
@@ -901,7 +863,7 @@ private:
 
     std::vector<const char *> deviceExts = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
-#if VKR_OS_MACOS
+#if defined(__APPLE__)
     uint32_t extCount = 0;
     vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extCount,
                                          nullptr);
@@ -1400,108 +1362,6 @@ private:
     vkCheck(vkCreateShaderModule(device_, &ci, nullptr, &module),
             "vkCreateShaderModule");
     return module;
-  }
-
-  void createGraphicsPipeline() {
-    auto vertCode = readFile(std::string(SHADER_DIR) + "/particle.vert.spv");
-    auto fragCode = readFile(std::string(SHADER_DIR) + "/particle.frag.spv");
-    VkShaderModule vert = createShaderModule(vertCode);
-    VkShaderModule frag = createShaderModule(fragCode);
-
-    VkPipelineShaderStageCreateInfo vs{
-        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    vs.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    vs.module = vert;
-    vs.pName = "main";
-    VkPipelineShaderStageCreateInfo fs{
-        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    fs.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    fs.module = frag;
-    fs.pName = "main";
-    VkPipelineShaderStageCreateInfo stages[] = {vs, fs};
-
-    std::array<VkVertexInputBindingDescription, 1> bindings{};
-    bindings[0].binding = 0;
-    bindings[0].stride = sizeof(float) * 2;
-    bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    std::array<VkVertexInputAttributeDescription, 1> attrs{};
-    attrs[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
-
-    VkPipelineVertexInputStateCreateInfo vi{
-        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vi.vertexBindingDescriptionCount = (uint32_t)bindings.size();
-    vi.pVertexBindingDescriptions = bindings.data();
-    vi.vertexAttributeDescriptionCount = (uint32_t)attrs.size();
-    vi.pVertexAttributeDescriptions = attrs.data();
-
-    VkPipelineInputAssemblyStateCreateInfo ia{
-        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-    VkPipelineViewportStateCreateInfo vp{
-        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-    vp.viewportCount = 1;
-    vp.scissorCount = 1;
-
-    VkPipelineRasterizationStateCreateInfo rs{
-        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-    rs.polygonMode = VK_POLYGON_MODE_FILL;
-    rs.cullMode = VK_CULL_MODE_NONE;
-    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    rs.lineWidth = 1.0f;
-
-    VkPipelineMultisampleStateCreateInfo ms{
-        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-    VkPipelineDepthStencilStateCreateInfo ds{
-        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-    ds.depthTestEnable = VK_TRUE;
-    ds.depthWriteEnable = VK_TRUE;
-    ds.depthCompareOp = VK_COMPARE_OP_LESS;
-
-    VkPipelineColorBlendAttachmentState cba{};
-    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    cba.blendEnable = VK_FALSE;
-    VkPipelineColorBlendStateCreateInfo cb{
-        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    cb.attachmentCount = 1;
-    cb.pAttachments = &cba;
-
-    std::array<VkDynamicState, 2> dynStates = {VK_DYNAMIC_STATE_VIEWPORT,
-                                               VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo dyn{
-        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dyn.dynamicStateCount = (uint32_t)dynStates.size();
-    dyn.pDynamicStates = dynStates.data();
-
-    createPipelineLayout(descriptorSetLayout_, pipelineLayout_,
-                         "create particle pipeline layout",
-                         VK_SHADER_STAGE_VERTEX_BIT, sizeof(PushConstants));
-
-    VkGraphicsPipelineCreateInfo ci{
-        VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-    ci.stageCount = 2;
-    ci.pStages = stages;
-    ci.pVertexInputState = &vi;
-    ci.pInputAssemblyState = &ia;
-    ci.pViewportState = &vp;
-    ci.pRasterizationState = &rs;
-    ci.pMultisampleState = &ms;
-    ci.pDepthStencilState = &ds;
-    ci.pColorBlendState = &cb;
-    ci.pDynamicState = &dyn;
-    ci.layout = pipelineLayout_;
-    ci.renderPass = renderPass_;
-    ci.subpass = 0;
-    vkCheck(vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &ci, nullptr,
-                                      &pipeline_),
-            "vkCreateGraphicsPipelines");
-
-    vkDestroyShaderModule(device_, vert, nullptr);
-    vkDestroyShaderModule(device_, frag, nullptr);
   }
 
   // Buffer helpers keep allocation, memory ownership, and mapping together.

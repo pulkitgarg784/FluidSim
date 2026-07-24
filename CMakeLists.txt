@@ -40,8 +40,6 @@ set(SHADER_OUT_DIR ${CMAKE_BINARY_DIR}/shaders)
 file(MAKE_DIRECTORY ${SHADER_OUT_DIR})
 
 set(SHADER_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_depth.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_depth.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_thickness.frag
