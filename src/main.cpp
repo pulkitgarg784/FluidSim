@@ -24,6 +24,14 @@ constexpr float moveSpeed = 1.5f;  // keyboard movement
 constexpr float interactionRadius = 1.5f;
 constexpr float interactionStrength = 40.0f;
 
+// width, height, length
+const float3 tankSize(8.77f, 4.20f, 2.92f);
+
+const float3 waterMin(-4.27f, -1.98f, -1.34f);
+const float3 waterMax(-2.19f, 1.69f, 1.34f);
+
+const uint32_t initialParticleCount = sph::maxParticles;
+
 static float3 globalEye = float3(0.0f, 5.0f, 14.0f);
 static float3 globalLookat = float3(0.0f, 0.0f, 0.0f);
 static float3 globalUp = normalize(float3(0.0f, 1.0f, 0.0f));
@@ -154,11 +162,43 @@ static float3 mouseRayDirection(double mouseX, double mouseY, int width,
   return normalize(dir);
 }
 
+static std::vector<float4>
+generateParticlePositions(const float3 &waterMin, const float3 &waterMax,
+                          uint32_t particleCount) {
+  std::vector<float4> positions(particleCount);
+  const float3 waterSize = waterMax - waterMin;
+  const float nominalSpacing =
+      std::cbrt((waterSize.x * waterSize.y * waterSize.z) /
+                float(particleCount));
+  const uint32_t countX =
+      std::max(1u, uint32_t(std::ceil(waterSize.x / nominalSpacing)));
+  const uint32_t countZ =
+      std::max(1u, uint32_t(std::ceil(waterSize.z / nominalSpacing)));
+  const uint64_t particlesPerLayer = uint64_t(countX) * countZ;
+  const uint32_t countY = std::max(
+      1u, uint32_t((uint64_t(particleCount) + particlesPerLayer - 1u) /
+                   particlesPerLayer));
+  const float3 spacing(waterSize.x / float(countX),
+                       waterSize.y / float(countY),
+                       waterSize.z / float(countZ));
+
+  for (uint32_t i = 0; i < particleCount; ++i) {
+    const uint32_t xIndex = i % countX;
+    const uint32_t zIndex = uint32_t((uint64_t(i) / countX) % countZ);
+    const uint32_t yIndex = uint32_t(uint64_t(i) / particlesPerLayer);
+    const float3 position =
+        waterMin +
+        spacing * (float3(float(xIndex), float(yIndex), float(zIndex)) + 0.5f);
+    positions[i] = float4(position.x, position.y, position.z, 0.0f);
+  }
+  return positions;
+}
+
 int main(int argc, char **argv) {
   constexpr int width = 1024;
   constexpr int height = 768;
 
-  uint32_t particleCount = sph::maxParticles;
+  uint32_t particleCount = initialParticleCount;
   std::string scenePath = "media/fluid_container.obj";
   float sceneScale = 1.0f;
   for (int arg = 1; arg < argc; ++arg) {
@@ -196,6 +236,12 @@ int main(int argc, char **argv) {
     }
   }
 
+  if (particleCount == 0 || particleCount > uint32_t(sph::maxParticles)) {
+    std::fprintf(stderr,
+                 "Configured particle count must be between 1 and %d\n",
+                 sph::maxParticles);
+    return 1;
+  }
   const float densityRatio =
       float(particleCount) / float(sph::referenceParticleCount);
   const float particleScale = std::cbrt(1.0f / densityRatio);
@@ -204,11 +250,17 @@ int main(int argc, char **argv) {
   const float simulationDeltaT = 0.002f * particleScale;
   const float renderRadius = 0.068f * particleScale;
 
-  uint32_t gridX = uint32_t(std::ceil(sph::boundsSize.x / smoothingRadius)) + 2u;
-  uint32_t gridY = uint32_t(std::ceil(sph::boundsSize.y / smoothingRadius)) + 2u;
-  uint32_t gridZ = uint32_t(std::ceil(sph::boundsSize.z / smoothingRadius)) + 2u;
+  uint32_t gridX = uint32_t(std::ceil(tankSize.x / smoothingRadius)) + 2u;
+  uint32_t gridY = uint32_t(std::ceil(tankSize.y / smoothingRadius)) + 2u;
+  uint32_t gridZ = uint32_t(std::ceil(tankSize.z / smoothingRadius)) + 2u;
   uint64_t gridCells64 = uint64_t(gridX) * gridY * gridZ;
   if (gridCells64 > uint64_t(particleCount) * 2u) {
+    std::fprintf(stderr,
+                 "Tank grid needs %llu cells, but the current particle count "
+                 "supports at most %llu. Increase the particle count or use a "
+                 "smaller tank.\n",
+                 static_cast<unsigned long long>(gridCells64),
+                 static_cast<unsigned long long>(uint64_t(particleCount) * 2u));
     return 1;
   }
 
@@ -244,9 +296,9 @@ int main(int argc, char **argv) {
   params.gravity[1] = sph::gravity.y;
   params.gravity[2] = sph::gravity.z;
   params.gravity[3] = sph::tensilePressureScale;
-  params.boundsSize[0] = sph::boundsSize.x;
-  params.boundsSize[1] = sph::boundsSize.y;
-  params.boundsSize[2] = sph::boundsSize.z;
+  params.boundsSize[0] = tankSize.x;
+  params.boundsSize[1] = tankSize.y;
+  params.boundsSize[2] = tankSize.z;
   params.deltaT = simulationDeltaT;
   params.smoothingRadius = smoothingRadius;
   params.particleMass = particleMass;
@@ -269,38 +321,9 @@ int main(int argc, char **argv) {
   renderer.setParams(params);
 
   {
-    std::vector<float4> initialPositions(particleCount);
-    std::vector<float4> initialVelocities(particleCount);
-    const float3 half = sph::boundsSize * 0.5f;
-    const float wallPadding = 1.5f * smoothingRadius;
-    const float3 damMin(-half.x + wallPadding, -half.y + wallPadding,
-                        -half.z + wallPadding);
-    const float3 damSize(sph::boundsSize.x * 0.25f - wallPadding,
-                         sph::boundsSize.y * 0.93f - wallPadding * 2.0f,
-                         sph::boundsSize.z - wallPadding * 2.0f);
-    const float particleSpacing = std::cbrt(
-        (damSize.x * damSize.y * damSize.z) / float(particleCount));
-    const uint32_t damX =
-        std::max(1u, uint32_t(std::ceil(damSize.x / particleSpacing)));
-    const uint32_t damZ =
-        std::max(1u, uint32_t(std::ceil(damSize.z / particleSpacing)));
-    const uint32_t damY = std::max(
-        1u, uint32_t((uint64_t(particleCount) + uint64_t(damX) * damZ - 1u) /
-                     (uint64_t(damX) * damZ)));
-    const float3 spacing(damSize.x / float(damX), damSize.y / float(damY),
-                         damSize.z / float(damZ));
-
-    for (uint32_t i = 0; i < particleCount; ++i) {
-      const uint32_t xIndex = i % damX;
-      const uint32_t zIndex = (i / damX) % damZ;
-      const uint32_t yIndex = i / (damX * damZ);
-      const float3 p =
-          damMin + spacing *
-                       (float3(float(xIndex), float(yIndex), float(zIndex)) +
-                        0.5f);
-      initialPositions[i] = float4(p.x, p.y, p.z, 0.0f);
-      initialVelocities[i] = float4(0.0f);
-    }
+    std::vector<float4> initialPositions =
+        generateParticlePositions(waterMin, waterMax, particleCount);
+    std::vector<float4> initialVelocities(particleCount, float4(0.0f));
     renderer.uploadInitialState(initialPositions, initialVelocities);
   }
 

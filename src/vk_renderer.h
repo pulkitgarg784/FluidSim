@@ -150,10 +150,7 @@ class VulkanRenderer {
   };
 
 public:
-  // A single simulation state lives in the SSBOs, so we serialize to one
-  // frame in flight to avoid two frames racing on those buffers.
-  static constexpr int kMaxFramesInFlight = 1;
-  // costly 1024x1024 particle raster passes every frame.
+  static constexpr int kMaxFramesInFlight = 2;
   static constexpr uint32_t kWaterShadowMapSize = 512;
 
   void init(int width, int height, const char *title, uint32_t numParticles) {
@@ -256,30 +253,25 @@ public:
     ImGui::Text("Simulated dt/frame: %.4f", frameDt);
     ImGui::Text("Active substeps: %d (dt %.5f)", activeSubsteps,
                 frameDt / float(activeSubsteps));
-    if (paramsBuf_.mapped) {
-      auto *physics = reinterpret_cast<SphParams *>(paramsBuf_.mapped);
+    {
+      SphParams &physics = liveSphParams_;
       ImGui::Separator();
       ImGui::TextUnformatted("Fluid physics");
-      ImGui::SliderFloat("Gravity", &physics->gravity[1], -20.0f, 0.0f,
+      ImGui::SliderFloat("Gravity", &physics.gravity[1], -20.0f, 0.0f,
                          "%.2f");
-      ImGui::SliderFloat("Target density", &physics->targetDensity, 500.0f,
+      ImGui::SliderFloat("Target density", &physics.targetDensity, 500.0f,
                          4000.0f, "%.0f");
-      ImGui::SliderFloat("Pressure stiffness", &physics->pressureMultiplier,
+      ImGui::SliderFloat("Pressure stiffness", &physics.pressureMultiplier,
                          1.0f, 500.0f, "%.1f",
                          ImGuiSliderFlags_Logarithmic);
-      ImGui::SliderFloat("Surface attraction", &physics->gravity[3], 0.0f,
+      ImGui::SliderFloat("Surface attraction", &physics.gravity[3], 0.0f,
                          0.25f, "%.3f");
-      ImGui::SliderFloat("Viscosity", &physics->viscosityStrength, 0.0f,
+      ImGui::SliderFloat("Viscosity", &physics.viscosityStrength, 0.0f,
                          0.02f, "%.4f");
-      ImGui::SliderFloat("Collision damping", &physics->collisionDamping,
+      ImGui::SliderFloat("Collision damping", &physics.collisionDamping,
                          0.0f, 1.0f, "%.2f");
       if (ImGui::Button("Reset water preset")) {
-        physics->gravity[1] = defaultSphParams_.gravity[1];
-        physics->gravity[3] = defaultSphParams_.gravity[3];
-        physics->targetDensity = defaultSphParams_.targetDensity;
-        physics->pressureMultiplier = defaultSphParams_.pressureMultiplier;
-        physics->viscosityStrength = defaultSphParams_.viscosityStrength;
-        physics->collisionDamping = defaultSphParams_.collisionDamping;
+        physics = defaultSphParams_;
         fluidSettings_.simulationRate = 10.0f;
       }
     }
@@ -332,7 +324,9 @@ public:
     gridCellCount_ = params.grid[3];
     baseDeltaT_ = params.deltaT;
     defaultSphParams_ = params;
-    std::memcpy(paramsBuf_.mapped, &params, sizeof(SphParams));
+    liveSphParams_ = params;
+    for (auto &buffer : paramsBuffers_)
+      std::memcpy(buffer.mapped, &params, sizeof(SphParams));
   }
 
   void setInteraction(const float3 &worldPoint, float radius, float strength) {
@@ -358,7 +352,6 @@ public:
                  const float3 &camForward, float radius, int substeps) {
     vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE,
                     UINT64_MAX);
-
     if (std::abs(fluidSettings_.renderScale - activeRenderScale_) > 0.001f) {
       // This only stalls when the user changes the quality control.
       vkDeviceWaitIdle(device_);
@@ -367,10 +360,12 @@ public:
       updateFluidDescriptors();
     }
 
-    auto *liveParams = reinterpret_cast<SphParams *>(paramsBuf_.mapped);
-    liveParams->deltaT = baseDeltaT_ * fluidSettings_.simulationRate /
+    SphParams frameParams = liveSphParams_;
+    frameParams.deltaT = baseDeltaT_ * fluidSettings_.simulationRate /
                          float(std::max(substeps, 1));
-    std::memcpy(interactionBuf_.mapped, &pendingInteraction_,
+    std::memcpy(paramsBuffers_[currentFrame_].mapped, &frameParams,
+                sizeof(frameParams));
+    std::memcpy(interactionBuffers_[currentFrame_].mapped, &pendingInteraction_,
                 sizeof(InteractionParams));
 
     uint32_t imageIndex = 0;
@@ -527,8 +522,11 @@ public:
     destroyBuffers({&positionsBuf_, &velocitiesBuf_, &predictedBuf_,
                     &densitiesBuf_, &keysBuf_, &indicesBuf_, &startBuf_,
                     &endBuf_, &sortedPosBuf_, &sortedVelBuf_, &sortedPredBuf_,
-                    &sortStorageBuf_, &paramsBuf_, &interactionBuf_,
-                    &sceneLightingBuf_, &quadBuffer_, &sceneMeshBuffer_});
+                    &sortStorageBuf_, &quadBuffer_, &sceneMeshBuffer_});
+    for (int i = 0; i < kMaxFramesInFlight; ++i) {
+      destroyBuffers({&paramsBuffers_[i], &interactionBuffers_[i],
+                      &sceneLightingBuffers_[i]});
+    }
 
     for (auto sem : renderFinishedSemaphores_)
       if (sem)
@@ -652,7 +650,7 @@ private:
   VkPipeline depthPipeline_ = VK_NULL_HANDLE;
   VkDescriptorSetLayout compositeSetLayout_ = VK_NULL_HANDLE;
   VkDescriptorPool compositePool_ = VK_NULL_HANDLE;
-  VkDescriptorSet compositeSet_ = VK_NULL_HANDLE;
+  std::array<VkDescriptorSet, kMaxFramesInFlight> compositeSets_{};
   VkPipelineLayout compositePipelineLayout_ = VK_NULL_HANDLE;
   VkPipeline backgroundPipeline_ = VK_NULL_HANDLE;
   VkPipelineLayout sceneMeshPipelineLayout_ = VK_NULL_HANDLE;
@@ -715,11 +713,12 @@ private:
   AllocatedBuffer velocitiesBuf_;
   AllocatedBuffer predictedBuf_;
   AllocatedBuffer densitiesBuf_;
-  AllocatedBuffer paramsBuf_;
+  std::array<AllocatedBuffer, kMaxFramesInFlight> paramsBuffers_;
+  SphParams liveSphParams_{};
   SphParams defaultSphParams_{};
-  AllocatedBuffer interactionBuf_;
+  std::array<AllocatedBuffer, kMaxFramesInFlight> interactionBuffers_;
   InteractionParams pendingInteraction_{};
-  AllocatedBuffer sceneLightingBuf_;
+  std::array<AllocatedBuffer, kMaxFramesInFlight> sceneLightingBuffers_;
   // spatial-hash buffers
   AllocatedBuffer keysBuf_;
   AllocatedBuffer indicesBuf_;
@@ -736,12 +735,12 @@ private:
 
   VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;
   VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
-  VkDescriptorSet descriptorSet_ = VK_NULL_HANDLE;
+  std::array<VkDescriptorSet, kMaxFramesInFlight> descriptorSets_{};
 
   VkPipelineLayout computePipelineLayout_ = VK_NULL_HANDLE;
 
   // 0:external+keys 1:reorder 2:startReset 3:startIndices 4:density
-  // 5:pressure 6:viscosity+integrate
+  // 5:pressure 6:viscosity + integration + tank
   std::array<VkPipeline, 7> computePipelines_{};
 
   VkCommandPool commandPool_ = VK_NULL_HANDLE;
@@ -922,6 +921,9 @@ private:
     std::vector<VkPresentModeKHR> modes(count);
     vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice_, surface_, &count,
                                               modes.data());
+    for (auto m : modes)
+      if (m == VK_PRESENT_MODE_IMMEDIATE_KHR)
+        return m;
     for (auto m : modes)
       if (m == VK_PRESENT_MODE_MAILBOX_KHR)
         return m;
@@ -1499,14 +1501,18 @@ private:
     createStorageBuffer(vec4Size, sortedVelBuf_);
     createStorageBuffer(vec4Size, sortedPredBuf_);
 
-    createMappedUniformBuffer<SphParams>(paramsBuf_, "SPH params buffer");
-    createMappedUniformBuffer<InteractionParams>(interactionBuf_,
-                                                 "interaction params buffer");
+    for (int i = 0; i < kMaxFramesInFlight; ++i) {
+      createMappedUniformBuffer<SphParams>(paramsBuffers_[i],
+                                           "SPH params buffer");
+      createMappedUniformBuffer<InteractionParams>(interactionBuffers_[i],
+                                                   "interaction params buffer");
+    }
   }
 
   void createSceneLightingBuffer() {
-    createMappedUniformBuffer<SceneLightingParams>(sceneLightingBuf_,
-                                                   "scene lighting buffer");
+    for (auto &buffer : sceneLightingBuffers_)
+      createMappedUniformBuffer<SceneLightingParams>(buffer,
+                                                     "scene lighting buffer");
   }
 
   void createSorter() {
@@ -1679,7 +1685,7 @@ private:
     constexpr VkShaderStageFlags compute = VK_SHADER_STAGE_COMPUTE_BIT;
     constexpr VkShaderStageFlags computeAndVertex =
         VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT;
-    descriptorSet_ = createDescriptorSets<1>(
+    descriptorSets_ = createDescriptorSets<kMaxFramesInFlight>(
         {storageBinding(0, computeAndVertex),
          storageBinding(1, computeAndVertex), storageBinding(2, compute),
          storageBinding(3, compute), uniformBinding(5, compute),
@@ -1688,21 +1694,25 @@ private:
          storageBinding(10, compute), storageBinding(11, compute),
          uniformBinding(12, compute), storageBinding(13, compute)},
         descriptorSetLayout_, descriptorPool_,
-        "create compute descriptor set")[0];
+        "create compute descriptor sets");
 
-    writeBufferDescriptors(descriptorSet_, {
-        storageDescriptor(0, positionsBuf_),
-        storageDescriptor(1, velocitiesBuf_),
-        storageDescriptor(2, predictedBuf_),
-        storageDescriptor(3, densitiesBuf_),
-        uniformDescriptor(5, paramsBuf_), storageDescriptor(6, keysBuf_),
-        storageDescriptor(7, indicesBuf_), storageDescriptor(8, startBuf_),
-        storageDescriptor(9, sortedPosBuf_),
-        storageDescriptor(10, sortedVelBuf_),
-        storageDescriptor(11, sortedPredBuf_),
-        uniformDescriptor(12, interactionBuf_),
-        storageDescriptor(13, endBuf_),
-    });
+    for (int i = 0; i < kMaxFramesInFlight; ++i) {
+      writeBufferDescriptors(descriptorSets_[i], {
+          storageDescriptor(0, positionsBuf_),
+          storageDescriptor(1, velocitiesBuf_),
+          storageDescriptor(2, predictedBuf_),
+          storageDescriptor(3, densitiesBuf_),
+          uniformDescriptor(5, paramsBuffers_[i]),
+          storageDescriptor(6, keysBuf_),
+          storageDescriptor(7, indicesBuf_),
+          storageDescriptor(8, startBuf_),
+          storageDescriptor(9, sortedPosBuf_),
+          storageDescriptor(10, sortedVelBuf_),
+          storageDescriptor(11, sortedPredBuf_),
+          uniformDescriptor(12, interactionBuffers_[i]),
+          storageDescriptor(13, endBuf_),
+      });
+    }
   }
 
   VkPipeline createComputePipeline(const std::string &spvName) {
@@ -2017,18 +2027,19 @@ private:
                               false, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
 
     constexpr VkShaderStageFlags fragment = VK_SHADER_STAGE_FRAGMENT_BIT;
-    const auto sets = createDescriptorSets<6>(
+    const auto sets = createDescriptorSets<kMaxFramesInFlight + 5>(
         {samplerBinding(0, fragment), samplerBinding(1, fragment),
          samplerBinding(2, fragment), samplerBinding(3, fragment),
          samplerBinding(4, fragment), samplerBinding(5, fragment),
          uniformBinding(6, fragment), samplerBinding(7, fragment)},
         compositeSetLayout_, compositePool_, "create fluid descriptor sets");
-    compositeSet_ = sets[0];
-    blurSetH_ = sets[1];
-    blurSetV_ = sets[2];
-    blurSetSmooth_ = sets[3];
-    thicknessBlurSet_ = sets[4];
-    thicknessBlurSetV_ = sets[5];
+    for (int i = 0; i < kMaxFramesInFlight; ++i)
+      compositeSets_[i] = sets[i];
+    blurSetH_ = sets[kMaxFramesInFlight + 0];
+    blurSetV_ = sets[kMaxFramesInFlight + 1];
+    blurSetSmooth_ = sets[kMaxFramesInFlight + 2];
+    thicknessBlurSet_ = sets[kMaxFramesInFlight + 3];
+    thicknessBlurSetV_ = sets[kMaxFramesInFlight + 4];
     updateFluidDescriptors();
 
     createPipelineLayout(compositeSetLayout_, compositePipelineLayout_,
@@ -2070,7 +2081,6 @@ private:
         "scene_mesh.vert.spv", "scene_mesh.frag.spv", scenePass_,
         sceneMeshPipelineLayout_, &sceneBind, sceneAttr.data(),
         (uint32_t)sceneAttr.size(), /*depthTest*/ true, 2);
-
     compositePipeline_ = buildGraphicsPipeline(
         "fullscreen.vert.spv", "fluid_composite.frag.spv", renderPass_,
         compositePipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false);
@@ -2083,17 +2093,22 @@ private:
         {blurSetSmooth_, 0, blurSmoothView_, fluidSampler_},
         {thicknessBlurSet_, 0, fluidThicknessView_, fluidSampler_},
         {thicknessBlurSetV_, 0, thicknessBlurTempView_, fluidSampler_},
-        {compositeSet_, 0, blurSmoothView_, fluidSampler_},
-        {compositeSet_, 1, sceneColorView_, sceneSampler_},
-        {compositeSet_, 2, environmentView_, envSampler_},
-        {compositeSet_, 3, sceneDepthView_, sceneSampler_},
-        {compositeSet_, 4, blurTempView_, fluidSampler_},
-        {compositeSet_, 5, waterShadowView_, sceneSampler_},
-        {compositeSet_, 7, waterShadowDepthView_, sceneSampler_},
     });
-    writeBufferDescriptors(compositeSet_, {
-        uniformDescriptor(6, sceneLightingBuf_, sizeof(SceneLightingParams)),
-    });
+    for (int i = 0; i < kMaxFramesInFlight; ++i) {
+      writeBufferDescriptors(compositeSets_[i], {
+          uniformDescriptor(6, sceneLightingBuffers_[i],
+                            sizeof(SceneLightingParams)),
+      });
+      writeImageDescriptors({
+          {compositeSets_[i], 0, blurSmoothView_, fluidSampler_},
+          {compositeSets_[i], 1, sceneColorView_, sceneSampler_},
+          {compositeSets_[i], 2, environmentView_, envSampler_},
+          {compositeSets_[i], 3, sceneDepthView_, sceneSampler_},
+          {compositeSets_[i], 4, blurTempView_, fluidSampler_},
+          {compositeSets_[i], 5, waterShadowView_, sceneSampler_},
+          {compositeSets_[i], 7, waterShadowDepthView_, sceneSampler_},
+      });
+    }
   }
 
   VkPipeline
@@ -2296,15 +2311,17 @@ private:
 
     const uint32_t groupsN = (numParticles_ + 255u) / 256u;
     const uint32_t groupsGrid = (gridCellCount_ + 255u) / 256u;
+    VkDescriptorSet computeSet = descriptorSets_[currentFrame_];
+    VkDescriptorSet compositeSet = compositeSets_[currentFrame_];
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            computePipelineLayout_, 0, 1, &descriptorSet_, 0,
+                            computePipelineLayout_, 0, 1, &computeSet, 0,
                             nullptr);
     for (int s = 0; s < substeps; ++s) {
       dispatchStage(cmd, computePipelines_[0],
                     groupsN); // external + exact keys
       radixSort(cmd);         // sort keys + indices
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                              computePipelineLayout_, 0, 1, &descriptorSet_, 0,
+                              computePipelineLayout_, 0, 1, &computeSet, 0,
                               nullptr);
       dispatchStage(cmd, computePipelines_[1], groupsN); // gather sorted state
       dispatchStage(cmd, computePipelines_[2], groupsGrid); // reset exact grid
@@ -2312,7 +2329,7 @@ private:
       dispatchStage(cmd, computePipelines_[4], groupsN);    // density
       dispatchStage(cmd, computePipelines_[5], groupsN);    // pressure
       dispatchStage(cmd, computePipelines_[6], groupsN,
-                    s + 1 < substeps); // viscosity + integrate
+                    s + 1 < substeps); // viscosity + integrate + collision
     }
 
     VkMemoryBarrier toVertex{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -2364,7 +2381,8 @@ private:
                                  fluidSettings_.extinctionBlue, 0.0f) *
                           fluidSettings_.absorptionScale;
     lighting.shadowParams = float4(fluidSettings_.shadowAmbientLight, 0, 0, 0);
-    std::memcpy(sceneLightingBuf_.mapped, &lighting, sizeof(lighting));
+    std::memcpy(sceneLightingBuffers_[currentFrame_].mapped, &lighting,
+                sizeof(lighting));
     const float shadowSize = static_cast<float>(kWaterShadowMapSize);
     VkViewport shadowViewport{0.0f, 0.0f, shadowSize, shadowSize, 0.0f, 1.0f};
     VkRect2D shadowScissor{{0, 0},
@@ -2401,7 +2419,7 @@ private:
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(DepthPush), &shadowDp);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            depthPipelineLayout_, 0, 1, &descriptorSet_, 0,
+                            depthPipelineLayout_, 0, 1, &computeSet, 0,
                             nullptr);
     VkBuffer shadowDepthVB[] = {quadBuffer_};
     VkDeviceSize shadowDepthOffsets[] = {0};
@@ -2427,7 +2445,7 @@ private:
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(DepthPush), &shadowDp);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            depthPipelineLayout_, 0, 1, &descriptorSet_, 0,
+                            depthPipelineLayout_, 0, 1, &computeSet, 0,
                             nullptr);
     VkBuffer shadowVB[] = {quadBuffer_};
     VkDeviceSize shadowOffsets[] = {0};
@@ -2437,9 +2455,9 @@ private:
     vkCmdEndRenderPass(cmd);
     colorToSampledBarrier(cmd, waterShadowImage_);
     waterShadowValid_ = true;
-    shadowSunAzimuth_ = fluidSettings_.sunAzimuthDegrees;
-    shadowSunElevation_ = fluidSettings_.sunElevationDegrees;
-    }
+      shadowSunAzimuth_ = fluidSettings_.sunAzimuthDegrees;
+      shadowSunElevation_ = fluidSettings_.sunElevationDegrees;
+      }
 
     // Render the environment background first so the water shader can
     // refract against it in screen space.
@@ -2463,7 +2481,7 @@ private:
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                compositePipelineLayout_, 0, 1, &compositeSet_, 0,
+                compositePipelineLayout_, 0, 1, &compositeSet, 0,
                 nullptr);
     vkCmdPushConstants(cmd, compositePipelineLayout_,
                VK_SHADER_STAGE_VERTEX_BIT |
@@ -2479,7 +2497,7 @@ private:
     if (sceneMeshVertexCount_ > 0) {
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneMeshPipeline_);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              sceneMeshPipelineLayout_, 0, 1, &compositeSet_,
+                              sceneMeshPipelineLayout_, 0, 1, &compositeSet,
                               0, nullptr);
       vkCmdPushConstants(cmd, sceneMeshPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                          0, sizeof(ScenePush), &scenePush);
@@ -2511,7 +2529,7 @@ private:
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(DepthPush), &dp);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            depthPipelineLayout_, 0, 1, &descriptorSet_, 0,
+                            depthPipelineLayout_, 0, 1, &computeSet, 0,
                             nullptr);
     VkBuffer thicknessVB[] = {quadBuffer_};
     VkDeviceSize thicknessOffsets[] = {0};
@@ -2544,7 +2562,7 @@ private:
                            VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(DepthPush), &surfaceDp);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            depthPipelineLayout_, 0, 1, &descriptorSet_, 0,
+                            depthPipelineLayout_, 0, 1, &computeSet, 0,
                             nullptr);
     VkBuffer vbs[] = {quadBuffer_};
     VkDeviceSize offsets[] = {0};
@@ -2634,7 +2652,7 @@ private:
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            compositePipelineLayout_, 0, 1, &compositeSet_, 0,
+                            compositePipelineLayout_, 0, 1, &compositeSet, 0,
                             nullptr);
     vkCmdPushConstants(cmd, compositePipelineLayout_,
                VK_SHADER_STAGE_VERTEX_BIT |
