@@ -1,9 +1,13 @@
 #include <algorithm>
+#include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 #include <imgui.h>
@@ -13,14 +17,15 @@
 
 #include "linalg.h"
 #include "sph.h"
+#include "utils.h"
 #include "vk_renderer.h"
 
 using namespace linalg::aliases;
 
 constexpr float PI = 3.14159265358979f;
 constexpr float DegToRad = PI / 180.0f;
-constexpr float ANGFACT = 0.2f;    // mouse look sensitivity
-constexpr float moveSpeed = 1.5f;  // keyboard movement
+constexpr float mouseLookSpeed = 0.2f; // mouse look sensitivity
+constexpr float moveSpeed = 1.5f;      // keyboard movement
 constexpr float interactionRadius = 1.5f;
 constexpr float interactionStrength = 40.0f;
 
@@ -30,7 +35,7 @@ const float3 tankSize(8.77f, 4.20f, 2.92f);
 const float3 waterMin(-4.27f, -1.98f, -1.34f);
 const float3 waterMax(-2.19f, 1.69f, 1.34f);
 
-const uint32_t initialParticleCount = sph::maxParticles;
+constexpr uint32_t initialParticleCount = sph::defaultFluidParticleCount;
 
 static float3 globalEye = float3(0.0f, 5.0f, 14.0f);
 static float3 globalLookat = float3(0.0f, 0.0f, 0.0f);
@@ -52,19 +57,18 @@ static void processKeyboard(GLFWwindow *w, float dt) {
   if (ImGui::GetIO().WantCaptureKeyboard)
     return;
   const float d = moveSpeed * dt;
-  auto down = [&](int k) { return glfwGetKey(w, k) == GLFW_PRESS; };
   float3 move = float3(0.0f);
-  if (down(GLFW_KEY_W))
+  if (glfwGetKey(w, GLFW_KEY_W) == GLFW_PRESS)
     move += globalViewDir;
-  if (down(GLFW_KEY_S))
+  if (glfwGetKey(w, GLFW_KEY_S) == GLFW_PRESS)
     move -= globalViewDir;
-  if (down(GLFW_KEY_D))
+  if (glfwGetKey(w, GLFW_KEY_D) == GLFW_PRESS)
     move += globalRight;
-  if (down(GLFW_KEY_A))
+  if (glfwGetKey(w, GLFW_KEY_A) == GLFW_PRESS)
     move -= globalRight;
-  if (down(GLFW_KEY_Q))
+  if (glfwGetKey(w, GLFW_KEY_Q) == GLFW_PRESS)
     move += globalUp;
-  if (down(GLFW_KEY_Z))
+  if (glfwGetKey(w, GLFW_KEY_Z) == GLFW_PRESS)
     move -= globalUp;
   if (dot(move, move) > 0.0f) {
     move = d * move;
@@ -73,7 +77,7 @@ static void processKeyboard(GLFWwindow *w, float dt) {
   }
 }
 
-static void mouseButtonFunc(GLFWwindow *window, int button, int action, int) {
+static void mouseButtonFunc(GLFWwindow *, int button, int action, int) {
   if (ImGui::GetIO().WantCaptureMouse) {
     if (button == GLFW_MOUSE_BUTTON_LEFT)
       mouseLeftPressed = false;
@@ -81,45 +85,29 @@ static void mouseButtonFunc(GLFWwindow *window, int button, int action, int) {
       mouseRightPressed = false;
     return;
   }
-
-  const bool shiftHeld = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
-                        glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
   if (button == GLFW_MOUSE_BUTTON_LEFT) {
-    if (action == GLFW_PRESS) {
-      if (!shiftHeld)
-        mouseLeftPressed = true;
-    } else if (action == GLFW_RELEASE) {
-      mouseLeftPressed = false;
-    }
+    mouseLeftPressed = (action == GLFW_PRESS);
   } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
     mouseRightPressed = (action == GLFW_PRESS);
   }
 }
 
-static void cursorPosFunc(GLFWwindow *, double mouse_x, double mouse_y) {
+static void cursorPosFunc(GLFWwindow *window, double mouse_x, double mouse_y) {
   if (ImGui::GetIO().WantCaptureMouse) {
     m_mouseX = mouse_x;
     m_mouseY = mouse_y;
     return;
   }
-  if (mouseLeftPressed) {
-    const float xfact = -ANGFACT * float(mouse_y - m_mouseY);
-    const float yfact = -ANGFACT * float(mouse_x - m_mouseX);
+  const bool shiftHeld =
+      glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+      glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+  if (mouseLeftPressed && !shiftHeld) {
+    const float xfact = -mouseLookSpeed * float(mouse_y - m_mouseY);
+    const float yfact = -mouseLookSpeed * float(mouse_x - m_mouseX);
     float3 v = globalViewDir;
 
-    struct {
-      float3 operator()(float theta, const float3 &v, const float3 &w) {
-        const float c = cosf(theta);
-        const float s = sinf(theta);
-        const float3 v0 = dot(v, w) * w;
-        const float3 v1 = v - v0;
-        const float3 v2 = cross(w, v1);
-        return v0 + c * v1 + s * v2;
-      }
-    } rotateVector;
-
-    v = rotateVector(xfact * DegToRad, v, globalRight);
-    v = rotateVector(yfact * DegToRad, v, globalUp);
+    v = utils::Utils::rotateVector(xfact * DegToRad, v, globalRight);
+    v = utils::Utils::rotateVector(yfact * DegToRad, v, globalUp);
     globalViewDir = v;
     globalLookat = globalEye + globalViewDir;
     globalRight = cross(globalViewDir, globalUp);
@@ -128,38 +116,16 @@ static void cursorPosFunc(GLFWwindow *, double mouse_x, double mouse_y) {
   m_mouseY = mouse_y;
 }
 
-static float4x4 perspectiveVK(float fovyDeg, float aspect, float zNear,
-                              float zFar) {
-  const float f = 1.0f / std::tan(fovyDeg * DegToRad * 0.5f);
-  float4x4 m(float4(0.0f), float4(0.0f), float4(0.0f), float4(0.0f));
-  m[0] = float4(f / aspect, 0.0f, 0.0f, 0.0f);
-  m[1] = float4(0.0f, -f, 0.0f, 0.0f);
-  m[2] = float4(0.0f, 0.0f, zFar / (zNear - zFar), -1.0f);
-  m[3] = float4(0.0f, 0.0f, (zFar * zNear) / (zNear - zFar), 0.0f);
-  return m;
-}
-
-static float4x4 lookAt(const float3 &eye, const float3 &center,
-                       const float3 &up) {
-  const float3 f = normalize(center - eye);
-  const float3 s = normalize(cross(f, normalize(up)));
-  const float3 u = cross(s, f);
-  float4x4 m = linalg::identity;
-  m[0] = float4(s.x, u.x, -f.x, 0.0f);
-  m[1] = float4(s.y, u.y, -f.y, 0.0f);
-  m[2] = float4(s.z, u.z, -f.z, 0.0f);
-  m[3] = float4(-dot(s, eye), -dot(u, eye), dot(f, eye), 1.0f);
-  return m;
-}
-
-static float3 mouseRayDirection(double mouseX, double mouseY, int width,
-                                int height, float fovyDeg, float aspect) {
-  float ndcX = (2.0f * float(mouseX) / float(width)) - 1.0f;
-  float ndcY = 1.0f - (2.0f * float(mouseY) / float(height));
-  float tanHalfFov = std::tan(fovyDeg * DegToRad * 0.5f);
-  float3 dir = globalViewDir + globalRight * (ndcX * tanHalfFov * aspect) +
-              cross(globalRight, globalViewDir) * (ndcY * tanHalfFov);
-  return normalize(dir);
+static bool parseParticleCount(std::string_view text,
+                               uint32_t &particleCount) {
+  uint32_t parsed = 0;
+  const auto [end, error] =
+      std::from_chars(text.data(), text.data() + text.size(), parsed);
+  if (error != std::errc{} || end != text.data() + text.size() || parsed == 0 ||
+      parsed > sph::maxParticles)
+    return false;
+  particleCount = parsed;
+  return true;
 }
 
 static std::vector<float4>
@@ -167,25 +133,22 @@ generateParticlePositions(const float3 &waterMin, const float3 &waterMax,
                           uint32_t particleCount) {
   std::vector<float4> positions(particleCount);
   const float3 waterSize = waterMax - waterMin;
-  const float nominalSpacing =
-      std::cbrt((waterSize.x * waterSize.y * waterSize.z) /
-                float(particleCount));
-  const uint32_t countX =
-      std::max(1u, uint32_t(std::ceil(waterSize.x / nominalSpacing)));
-  const uint32_t countZ =
-      std::max(1u, uint32_t(std::ceil(waterSize.z / nominalSpacing)));
-  const uint64_t particlesPerLayer = uint64_t(countX) * countZ;
+  const float nominalSpacing = std::cbrt(
+      (waterSize.x * waterSize.y * waterSize.z) / float(particleCount));
+  const uint32_t countX = std::max(
+      1u, static_cast<uint32_t>(std::ceil(waterSize.x / nominalSpacing)));
+  const uint32_t countZ = std::max(
+      1u, static_cast<uint32_t>(std::ceil(waterSize.z / nominalSpacing)));
+  const uint32_t particlesPerLayer = countX * countZ;
   const uint32_t countY = std::max(
-      1u, uint32_t((uint64_t(particleCount) + particlesPerLayer - 1u) /
-                   particlesPerLayer));
-  const float3 spacing(waterSize.x / float(countX),
-                       waterSize.y / float(countY),
+      1u, (particleCount + particlesPerLayer - 1u) / particlesPerLayer);
+  const float3 spacing(waterSize.x / float(countX), waterSize.y / float(countY),
                        waterSize.z / float(countZ));
 
   for (uint32_t i = 0; i < particleCount; ++i) {
     const uint32_t xIndex = i % countX;
-    const uint32_t zIndex = uint32_t((uint64_t(i) / countX) % countZ);
-    const uint32_t yIndex = uint32_t(uint64_t(i) / particlesPerLayer);
+    const uint32_t zIndex = (i / countX) % countZ;
+    const uint32_t yIndex = i / particlesPerLayer;
     const float3 position =
         waterMin +
         spacing * (float3(float(xIndex), float(yIndex), float(zIndex)) + 0.5f);
@@ -205,14 +168,8 @@ int main(int argc, char **argv) {
     std::string flag = argv[arg];
     if (flag == "--particles" && arg + 1 < argc) {
       ++arg;
-      try {
-        unsigned long requested = std::stoul(argv[arg]);
-        if (requested == 0 ||
-            requested > static_cast<unsigned long>(sph::maxParticles))
-          throw std::out_of_range("particle count");
-        particleCount = static_cast<uint32_t>(requested);
-      } catch (const std::exception &) {
-        std::fprintf(stderr, "Particle count must be between 1 and %d\n",
+      if (!parseParticleCount(argv[arg], particleCount)) {
+        std::fprintf(stderr, "Particle count must be between 1 and %u\n",
                      sph::maxParticles);
         return 1;
       }
@@ -229,16 +186,15 @@ int main(int argc, char **argv) {
       }
     } else {
       std::fprintf(stderr,
-                   "Usage: %s [--particles 1..%d] [--scene mesh.obj] "
+                   "Usage: %s [--particles 1..%u] [--scene mesh.obj] "
                    "[--scene-scale positive]\n",
                    argv[0], sph::maxParticles);
       return 1;
     }
   }
 
-  if (particleCount == 0 || particleCount > uint32_t(sph::maxParticles)) {
-    std::fprintf(stderr,
-                 "Configured particle count must be between 1 and %d\n",
+  if (particleCount == 0 || particleCount > sph::maxParticles) {
+    std::fprintf(stderr, "Particle count must be between 1 and %u\n",
                  sph::maxParticles);
     return 1;
   }
@@ -250,23 +206,29 @@ int main(int argc, char **argv) {
   const float simulationDeltaT = 0.002f * particleScale;
   const float renderRadius = 0.068f * particleScale;
 
-  uint32_t gridX = uint32_t(std::ceil(tankSize.x / smoothingRadius)) + 2u;
-  uint32_t gridY = uint32_t(std::ceil(tankSize.y / smoothingRadius)) + 2u;
-  uint32_t gridZ = uint32_t(std::ceil(tankSize.z / smoothingRadius)) + 2u;
-  uint64_t gridCells64 = uint64_t(gridX) * gridY * gridZ;
-  if (gridCells64 > uint64_t(particleCount) * 2u) {
+  const uint32_t gridX =
+      static_cast<uint32_t>(std::ceil(tankSize.x / smoothingRadius)) +
+      2u;
+  const uint32_t gridY =
+      static_cast<uint32_t>(std::ceil(tankSize.y / smoothingRadius)) +
+      2u;
+  const uint32_t gridZ =
+      static_cast<uint32_t>(std::ceil(tankSize.z / smoothingRadius)) +
+      2u;
+  const uint32_t gridCellCount = gridX * gridY * gridZ;
+  const uint32_t maxGridCellCount = particleCount * 2u;
+  if (gridCellCount > maxGridCellCount) {
     std::fprintf(stderr,
-                 "Tank grid needs %llu cells, but the current particle count "
-                 "supports at most %llu. Increase the particle count or use a "
+                 "Tank grid needs %u cells, but the current particle count "
+                 "supports at most %u. Increase the particle count or use a "
                  "smaller tank.\n",
-                 static_cast<unsigned long long>(gridCells64),
-                 static_cast<unsigned long long>(uint64_t(particleCount) * 2u));
+                 gridCellCount, maxGridCellCount);
     return 1;
   }
 
-  std::cout << "Starting " << particleCount << " particles; h="
-            << smoothingRadius << ", grid=" << gridX << 'x' << gridY << 'x'
-            << gridZ << std::endl;
+  std::cout << "Starting " << particleCount
+            << " particles; h=" << smoothingRadius << ", grid=" << gridX << 'x'
+            << gridY << 'x' << gridZ << std::endl;
 
   vkr::VulkanRenderer renderer;
   try {
@@ -279,9 +241,11 @@ int main(int argc, char **argv) {
   }
 
   GLFWwindow *win = renderer.window();
+
   glfwSetKeyCallback(win, keyFunc);
   glfwSetMouseButtonCallback(win, mouseButtonFunc);
   glfwSetCursorPosCallback(win, cursorPosFunc);
+
   try {
     renderer.initImGui();
   } catch (const std::exception &e) {
@@ -295,7 +259,7 @@ int main(int argc, char **argv) {
   params.gravity[0] = sph::gravity.x;
   params.gravity[1] = sph::gravity.y;
   params.gravity[2] = sph::gravity.z;
-  params.gravity[3] = sph::tensilePressureScale;
+  params.gravity[3] = sph::nearPressureMultiplier;
   params.boundsSize[0] = tankSize.x;
   params.boundsSize[1] = tankSize.y;
   params.boundsSize[2] = tankSize.z;
@@ -306,20 +270,22 @@ int main(int argc, char **argv) {
   params.pressureMultiplier = sph::pressureMultiplier;
   params.viscosityStrength = sph::viscosityStrength;
   params.collisionDamping = sph::collisionDamping;
-  const float h2 = smoothingRadius * smoothingRadius;
-  const float h5 = h2 * h2 * smoothingRadius;
-  const float h9 = h2 * h2 * h2 * h2 * smoothingRadius;
-  params.spikyPow2Scale = 15.0f / (2.0f * PI * h5);
-  params.spikyPow2GradScale = 15.0f / (PI * h5);
-  params.poly6Scale = 315.0f / (64.0f * PI * h9);
+  const float r2 = smoothingRadius * smoothingRadius;
+  const float r5 = r2 * r2 * smoothingRadius;
+  const float r9 = r2 * r2 * r2 * r2 * smoothingRadius;
+  params.densityKernelScale = 15.0f / (2.0f * PI * r5);
+  params.pressureGradientKernelScale = 15.0f / (PI * r5);
+  params.viscosityKernelScale = 315.0f / (64.0f * PI * r9);
   params.numParticles = particleCount;
   params.epsilon = sph::Epsilon;
   params.grid[0] = gridX;
   params.grid[1] = gridY;
   params.grid[2] = gridZ;
-  params.grid[3] = static_cast<uint32_t>(gridCells64);
+  params.grid[3] = gridCellCount;
   renderer.setParams(params);
 
+  // Upload initial particle positions and velocities.
+  // Scoped to ensure the large vectors are destroyed after upload.
   {
     std::vector<float4> initialPositions =
         generateParticlePositions(waterMin, waterMax, particleCount);
@@ -354,10 +320,11 @@ int main(int argc, char **argv) {
       windowHeight = std::max(windowHeight, 1);
       framebufferWidth = std::max(framebufferWidth, 1);
       framebufferHeight = std::max(framebufferHeight, 1);
-      const float aspect =
-          float(framebufferWidth) / float(framebufferHeight);
-      const float4x4 proj = perspectiveVK(45.0f, aspect, 0.01f, 100.0f);
-      const float4x4 view = lookAt(globalEye, globalLookat, globalUp);
+      const float aspect = float(framebufferWidth) / float(framebufferHeight);
+      const float4x4 proj =
+          utils::Utils::perspectiveVK(45.0f, aspect, 0.01f, 100.0f);
+      const float4x4 view =
+          utils::Utils::lookAt(globalEye, globalLookat, globalUp);
 
       // Shift+Left click attracts the fluid, Shift+Right click repels it.
       const bool shiftHeld =
@@ -366,8 +333,9 @@ int main(int argc, char **argv) {
       float interactionStrengthSigned = 0.0f;
       float3 interactionPoint = float3(0.0f);
       if (shiftHeld && (mouseLeftPressed || mouseRightPressed)) {
-        float3 rayDir = mouseRayDirection(m_mouseX, m_mouseY, windowWidth,
-                                          windowHeight, 45.0f, aspect);
+        float3 rayDir = utils::Utils::mouseRayDirection(
+            m_mouseX, m_mouseY, windowWidth, windowHeight, 45.0f, aspect,
+            globalViewDir, globalRight);
         float3 planeNormal = -globalViewDir; // faces the camera
         float3 planePoint = float3(0.0f);    // box centre
         float denom = dot(rayDir, planeNormal);

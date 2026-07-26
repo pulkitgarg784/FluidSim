@@ -1,7 +1,7 @@
 #version 450
 layout(local_size_x = 256) in;
 
-layout(std430, binding = 3) buffer Densities { float densities[]; };
+layout(std430, binding = 3) buffer Densities { vec2 densities[]; };
 layout(std140, binding = 5) uniform Params {
   vec4 gravity;
   vec4 boundsSize;
@@ -12,9 +12,9 @@ layout(std140, binding = 5) uniform Params {
   float pressureMultiplier;
   float viscosityStrength;
   float collisionDamping;
-  float spikyPow2Scale;
-  float spikyPow2GradScale;
-  float poly6Scale;
+  float densityKernelScale;
+  float pressureGradientKernelScale;
+  float viscosityKernelScale;
   uint numParticles;
   float epsilon;
   uvec4 grid;
@@ -48,6 +48,8 @@ void main() {
   float h = P.smoothingRadius;
   float h2 = h * h;
   float density = 0.0;
+  float nearDensity = 0.0;
+  float nearDensityScale = 2.0 * P.densityKernelScale / h;
 
   for (int dz = z0; dz <= z1; ++dz)
   for (int dy = y0; dy <= y1; ++dy)
@@ -61,9 +63,10 @@ void main() {
       float dst2 = dot(offset, offset);
       if (dst2 < h2) {
         float v = h - sqrt(dst2);
-        density += P.particleMass * v * v * P.spikyPow2Scale;
+        density += P.particleMass * v * v * P.densityKernelScale;
+        nearDensity += P.particleMass * v * v * v * nearDensityScale;
       }
     }
   }
-  densities[idx] = max(density, P.epsilon);
+  densities[idx] = max(vec2(density, nearDensity), vec2(P.epsilon));
 }

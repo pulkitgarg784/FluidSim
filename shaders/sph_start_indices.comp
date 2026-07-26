@@ -11,9 +11,9 @@ layout(std140, binding = 5) uniform Params {
   float pressureMultiplier;
   float viscosityStrength;
   float collisionDamping;
-  float spikyPow2Scale;
-  float spikyPow2GradScale;
-  float poly6Scale;
+  float densityKernelScale;
+  float pressureGradientKernelScale;
+  float viscosityKernelScale;
   uint numParticles;
   float epsilon;
   uvec4 grid;

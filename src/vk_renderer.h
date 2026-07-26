@@ -43,7 +43,7 @@ namespace vkr {
 
 // SPH parameter block
 struct SphParams {
-  float gravity[4];    // xyz used
+  float gravity[4];    // xyz = gravity, w = near-pressure multiplier
   float boundsSize[4]; // xyz used
   float deltaT;
   float smoothingRadius;
@@ -52,9 +52,9 @@ struct SphParams {
   float pressureMultiplier;
   float viscosityStrength;
   float collisionDamping;
-  float spikyPow2Scale;
-  float spikyPow2GradScale;
-  float poly6Scale;
+  float densityKernelScale;
+  float pressureGradientKernelScale;
+  float viscosityKernelScale;
   uint32_t numParticles;
   float epsilon;
   uint32_t grid[4]; // xyz = exact grid dimensions, w = total cells
@@ -208,6 +208,8 @@ public:
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
+    ImGui::GetStyle().ScaleAllSizes(0.8f);
+    ImGui::GetIO().FontGlobalScale = 0.85f;
     if (!ImGui_ImplGlfw_InitForVulkan(window_, true))
       throw std::runtime_error("Failed to initialize ImGui GLFW backend");
 
@@ -264,14 +266,15 @@ public:
       ImGui::SliderFloat("Pressure stiffness", &physics.pressureMultiplier,
                          1.0f, 500.0f, "%.1f",
                          ImGuiSliderFlags_Logarithmic);
-      ImGui::SliderFloat("Surface attraction", &physics.gravity[3], 0.0f,
-                         0.25f, "%.3f");
+      ImGui::SliderFloat("Near pressure", &physics.gravity[3], 0.0f, 2.0f,
+                         "%.3f", ImGuiSliderFlags_Logarithmic);
       ImGui::SliderFloat("Viscosity", &physics.viscosityStrength, 0.0f,
                          0.02f, "%.4f");
       ImGui::SliderFloat("Collision damping", &physics.collisionDamping,
                          0.0f, 1.0f, "%.2f");
       if (ImGui::Button("Reset water preset")) {
         physics = defaultSphParams_;
+        fluidSettings_.simulationSubsteps = 1;
         fluidSettings_.simulationRate = 10.0f;
       }
     }
@@ -1484,7 +1487,7 @@ private:
 
   void createComputeBuffers() {
     VkDeviceSize vec4Size = sizeof(float) * 4 * numParticles_;
-    VkDeviceSize fltSize = sizeof(float) * numParticles_;
+    VkDeviceSize densitySize = sizeof(float) * 2 * numParticles_;
     VkDeviceSize uintSize = sizeof(uint32_t) * numParticles_;
     startCapacity_ = numParticles_ * 2u;
     VkDeviceSize startSize = sizeof(uint32_t) * startCapacity_;
@@ -1492,7 +1495,7 @@ private:
     createStorageBuffer(vec4Size, positionsBuf_, true);
     createStorageBuffer(vec4Size, velocitiesBuf_, true);
     createStorageBuffer(vec4Size, predictedBuf_);
-    createStorageBuffer(fltSize, densitiesBuf_);
+    createStorageBuffer(densitySize, densitiesBuf_);
     createStorageBuffer(uintSize, keysBuf_);
     createStorageBuffer(uintSize, indicesBuf_);
     createStorageBuffer(startSize, startBuf_);

@@ -7,7 +7,7 @@ layout(std140, binding = 5) uniform Params {
   vec4 gravity; vec4 boundsSize;
   float deltaT; float smoothingRadius; float particleMass; float targetDensity;
   float pressureMultiplier; float viscosityStrength; float collisionDamping;
-  float spikyPow2Scale; float spikyPow2GradScale; float poly6Scale;
+  float densityKernelScale; float pressureGradientKernelScale; float viscosityKernelScale;
   uint numParticles; float epsilon; uvec4 grid;
 } P;
 layout(std430, binding = 9) readonly buffer SortedPos { vec4 sortedPos[]; };
@@ -55,7 +55,7 @@ void main() {
       float dst2 = dot(offset, offset);
       if (dst2 >= h2) continue;
       float v = h2 - dst2;
-      float influence = v * v * v * P.poly6Scale;
+      float influence = v * v * v * P.viscosityKernelScale;
       viscosity += (sortedVel[e].xyz - vi) * influence;
     }
   }

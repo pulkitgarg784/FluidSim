@@ -13,9 +13,12 @@ namespace sph {
 constexpr float PI = 3.14159265358979f;
 
 // integration
-constexpr int referenceParticleCount = 75000;
-constexpr int maxParticles = 300000;
-constexpr int numParticles = maxParticles;
+constexpr uint32_t referenceParticleCount = 75000u;
+constexpr uint32_t defaultFluidParticleCount = 300000u;
+constexpr uint32_t maxWhitewaterParticleCount = 100000u;
+constexpr uint32_t maxParticles =
+    defaultFluidParticleCount + maxWhitewaterParticleCount;
+constexpr uint32_t numParticles = defaultFluidParticleCount;
 constexpr float particleScale = 0.625f;
 constexpr float deltaT = 0.002f * particleScale;
 constexpr float3 gravity = float3(0.0f, -9.8f, 0.0f);
@@ -26,6 +29,7 @@ constexpr float collisionDamping = 0.95f;    // velocity kept on a wall bounce
 constexpr float3 boundsSize = float3(8.77f, 4.20f, 2.92f); // simulation box extents
 constexpr float targetDensity = 2315.0f;
 constexpr float pressureMultiplier = 16.0f;
+constexpr float nearPressureMultiplier = 0.12f;
 constexpr float viscosityStrength = 0.001f;
 constexpr float tensilePressureScale = 0.05f;
 constexpr int simIterationsPerFrame = 1;
@@ -110,19 +114,19 @@ public:
                          boundsSize.z - wallPadding * 2.0f);
     const float particleSpacing =
         std::cbrt((damSize.x * damSize.y * damSize.z) / float(numParticles));
-    const uint32_t damX = std::max(1u, uint32_t(std::ceil(damSize.x / particleSpacing)));
-    const uint32_t damZ = std::max(1u, uint32_t(std::ceil(damSize.z / particleSpacing)));
+    const uint32_t damX =
+        std::max(1u, static_cast<uint32_t>(std::ceil(damSize.x / particleSpacing)));
+    const uint32_t damZ =
+        std::max(1u, static_cast<uint32_t>(std::ceil(damSize.z / particleSpacing)));
     const uint32_t damY = std::max(
-        1u, uint32_t((uint64_t(numParticles) + uint64_t(damX) * damZ - 1u) /
-                     (uint64_t(damX) * damZ)));
+        1u, (numParticles + damX * damZ - 1u) / (damX * damZ));
     const float3 spacing(damSize.x / float(damX), damSize.y / float(damY),
                          damSize.z / float(damZ));
-    for (int i = 0; i < numParticles; i++) {
+    for (uint32_t i = 0; i < numParticles; ++i) {
       Particle &p = particles[i];
-      const uint32_t index = uint32_t(i);
-      const uint32_t xIndex = index % damX;
-      const uint32_t zIndex = (index / damX) % damZ;
-      const uint32_t yIndex = index / (damX * damZ);
+      const uint32_t xIndex = i % damX;
+      const uint32_t zIndex = (i / damX) % damZ;
+      const uint32_t yIndex = i / (damX * damZ);
       p.position = damMin + spacing *
           (float3(float(xIndex), float(yIndex), float(zIndex)) + 0.5f);
       p.velocity = float3(0.0f);
@@ -139,7 +143,7 @@ public:
 
   void simulationStep() {
     // gravity + lookahead predictedPosition 
-    for (int i = 0; i < numParticles; i++) {
+    for (uint32_t i = 0; i < numParticles; ++i) {
       particles[i].velocity += gravity * deltaT;
       particles[i].predictedPosition =
           particles[i].position + particles[i].velocity * deltaT;
@@ -150,27 +154,27 @@ public:
     updateDensities();
 
     // pressure + acceleration + velocity 
-    for (int i = 0; i < numParticles; i++) {
+    for (uint32_t i = 0; i < numParticles; ++i) {
       float3 pressureForce = calculatePressureForce(i);
       float3 pressureAcceleration = pressureForce / densities[i];
       particles[i].velocity += pressureAcceleration * deltaT;
     }
 
     // viscosity. pull towards neighbour avergae
-    for (int i = 0; i < numParticles; i++)
+    for (uint32_t i = 0; i < numParticles; ++i)
       viscosityForces[i] = calculateViscosityForce(i);
-    for (int i = 0; i < numParticles; i++)
+    for (uint32_t i = 0; i < numParticles; ++i)
       particles[i].velocity += viscosityForces[i] * deltaT;
 
     // set position and check collision
-    for (int i = 0; i < numParticles; i++) {
+    for (uint32_t i = 0; i < numParticles; ++i) {
       particles[i].position += particles[i].velocity * deltaT;
       particles[i].resolveCollisions();
     }
   }
 
   void updateDensities() {
-    for (int i = 0; i < numParticles; i++)
+    for (uint32_t i = 0; i < numParticles; ++i)
       densities[i] = calculateDensity(particles[i].predictedPosition);
   }
 
@@ -182,17 +186,20 @@ public:
   }
 
   static uint32_t keyFromCell(int cx, int cy, int cz) {
-    uint32_t a = (uint32_t)(int32_t)cx * 15823u;
-    uint32_t b = (uint32_t)(int32_t)cy * 9737333u;
-    uint32_t c = (uint32_t)(int32_t)cz * 440817757u;
-    return (a + b + c) % (uint32_t)numParticles;
+    const uint32_t a =
+        static_cast<uint32_t>(static_cast<int32_t>(cx)) * 15823u;
+    const uint32_t b =
+        static_cast<uint32_t>(static_cast<int32_t>(cy)) * 9737333u;
+    const uint32_t c =
+        static_cast<uint32_t>(static_cast<int32_t>(cz)) * 440817757u;
+    return (a + b + c) % numParticles;
   }
 
   // Assign each particle a cell key, sort by key, and record bucket starts.
   void updateSpatialHash() {
-    for (int i = 0; i < numParticles; i++) {
+    for (uint32_t i = 0; i < numParticles; ++i) {
       int3 c = cellCoord(particles[i].predictedPosition);
-      spatialEntries[i].index = (uint32_t)i;
+      spatialEntries[i].index = i;
       spatialEntries[i].key = keyFromCell(c.x, c.y, c.z);
     }
     std::sort(spatialEntries.begin(), spatialEntries.end(),
@@ -200,11 +207,11 @@ public:
                 return a.key < b.key;
               });
     std::fill(startIndices.begin(), startIndices.end(), UINT32_MAX);
-    for (int i = 0; i < numParticles; i++) {
+    for (uint32_t i = 0; i < numParticles; ++i) {
       uint32_t key = spatialEntries[i].key;
       uint32_t prev = (i == 0) ? UINT32_MAX : spatialEntries[i - 1].key;
       if (key != prev)
-        startIndices[key] = (uint32_t)i;
+        startIndices[key] = i;
     }
   }
 
@@ -233,10 +240,10 @@ public:
       uint32_t start = startIndices[key];
       if (start == UINT32_MAX) // invalid cell
         continue;
-      for (uint32_t e = start; e < (uint32_t)numParticles; e++) {
+      for (uint32_t e = start; e < numParticles; ++e) {
         if (spatialEntries[e].key != key)
           break;
-        fn((int)spatialEntries[e].index);
+        fn(spatialEntries[e].index);
       }
     }
   }
@@ -250,7 +257,7 @@ public:
 
   float calculateDensity(const float3 &samplePoint) const {
     float density = 0.0f;
-    forEachNeighbour(samplePoint, [&](int j) {
+    forEachNeighbour(samplePoint, [&](uint32_t j) {
       float dst = length(particles[j].predictedPosition - samplePoint);
       density += particleMass * smoothingKernel(smoothingRadius, dst);
     });
@@ -276,10 +283,10 @@ public:
     return (pressureA + pressureB) * 0.5f;
   }
 
-  float3 calculatePressureForce(int particleIndex) const {
+  float3 calculatePressureForce(uint32_t particleIndex) const {
     float3 pressureForce = float3(0.0f);
     const float3 samplePoint = particles[particleIndex].predictedPosition;
-    forEachNeighbour(samplePoint, [&](int i) {
+    forEachNeighbour(samplePoint, [&](uint32_t i) {
       if (i == particleIndex)
         return;
       float3 offset = particles[i].predictedPosition - samplePoint;
@@ -310,11 +317,11 @@ public:
     return v * v * v * viscocityScale;
   }
 
-  float3 calculateViscosityForce(int particleIndex) const {
+  float3 calculateViscosityForce(uint32_t particleIndex) const {
     float3 viscosityForce = float3(0.0f);
     const float3 pos = particles[particleIndex].predictedPosition;
     const float3 vel = particles[particleIndex].velocity;
-    forEachNeighbour(pos, [&](int i) {
+    forEachNeighbour(pos, [&](uint32_t i) {
       if (i == particleIndex)
         return;
       float dst = length(particles[i].predictedPosition - pos);

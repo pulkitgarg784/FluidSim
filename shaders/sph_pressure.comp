@@ -1,7 +1,7 @@
 #version 450
 layout(local_size_x = 256) in;
 
-layout(std430, binding = 3) readonly buffer Densities { float densities[]; };
+layout(std430, binding = 3) readonly buffer Densities { vec2 densities[]; };
 layout(std140, binding = 5) uniform Params {
   vec4 gravity;
   vec4 boundsSize;
@@ -12,9 +12,9 @@ layout(std140, binding = 5) uniform Params {
   float pressureMultiplier;
   float viscosityStrength;
   float collisionDamping;
-  float spikyPow2Scale;
-  float spikyPow2GradScale;
-  float poly6Scale;
+  float densityKernelScale;
+  float pressureGradientKernelScale;
+  float viscosityKernelScale;
   uint numParticles;
   float epsilon;
   uvec4 grid;
@@ -32,10 +32,10 @@ uint cellKey(ivec3 c) {
   return (uint(c.z) * P.grid.y + uint(c.y)) * P.grid.x + uint(c.x);
 }
 float pressureFromDensity(float d) {
-  float densityError = d - P.targetDensity;
-  if (densityError < 0.0)
-    densityError *= P.gravity.w;
-  return densityError * P.pressureMultiplier;
+  return (d - P.targetDensity) * P.pressureMultiplier;
+}
+float nearPressureFromDensity(float d) {
+  return d * P.gravity.w;
 }
 vec3 randomDir(uint seed) {
   seed = seed * 747796405u + 2891336453u;
@@ -52,10 +52,13 @@ void main() {
   if (idx >= P.numParticles) return;
 
   vec3 pi = sortedPred[idx].xyz;
-  float di = max(densities[idx], P.epsilon);
+  vec2 densityI = max(densities[idx], vec2(P.epsilon));
+  float di = densityI.x;
   float pressureI = pressureFromDensity(di);
+  float nearPressureI = nearPressureFromDensity(densityI.y);
   float h = P.smoothingRadius;
   float h2 = h * h;
+  float nearGradientScale = 6.0 * P.densityKernelScale / h;
   ivec3 center = gridCell(pi);
   int rowStride = int(P.grid.x);
   int sliceStride = rowStride * int(P.grid.y);
@@ -85,10 +88,17 @@ void main() {
       float dst = sqrt(dst2);
       vec3 dir = (dst < P.epsilon) ? randomDir(idx * P.numParticles + e)
                                    : offset / dst;
-      float dj = max(densities[e], P.epsilon);
+      vec2 densityJ = max(densities[e], vec2(P.epsilon));
+      float dj = densityJ.x;
       float sharedPressure = 0.5 * (pressureFromDensity(dj) + pressureI);
-      float slope = (dst - h) * P.spikyPow2GradScale;
-      force += sharedPressure * dir * slope * P.particleMass / dj;
+      float sharedNearPressure =
+          0.5 * (nearPressureFromDensity(densityJ.y) + nearPressureI);
+      float v = h - dst;
+      float densitySlope = -v * P.pressureGradientKernelScale;
+      float nearDensitySlope = -v * v * nearGradientScale;
+      force += sharedPressure * dir * densitySlope * P.particleMass / dj;
+      force += sharedNearPressure * dir * nearDensitySlope * P.particleMass /
+               densityJ.y;
     }
   }
 
