@@ -8,8 +8,8 @@
 #include <backends/imgui_impl_vulkan.h>
 #include <imgui.h>
 
-#include <array>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -133,7 +133,7 @@ struct FluidRenderSettings {
 inline void vkCheck(VkResult r, const char *what) {
   if (r != VK_SUCCESS) {
     throw std::runtime_error(std::string("Vulkan error in ") + what + ": " +
-                             std::to_string((int)r));
+                             std::to_string(static_cast<int>(r)));
   }
 }
 
@@ -151,7 +151,11 @@ class VulkanRenderer {
 
 public:
   static constexpr int kMaxFramesInFlight = 2;
-  static constexpr uint32_t kWaterShadowMapSize = 512;
+  static constexpr uint32_t kWaterShadowMapSize = 512u;
+  static constexpr uint32_t kComputeWorkgroupSize = 256u;
+  static constexpr float kNoSurfaceDepth = 1.0e4f;
+  static constexpr float kDegreesToRadians =
+      3.14159265358979323846f / 180.0f;
 
   void init(int width, int height, const char *title, uint32_t numParticles) {
     numParticles_ = numParticles;
@@ -195,8 +199,8 @@ public:
     createHostBuffer(size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices.data(),
                      sceneMeshBuffer_, "scene mesh");
     sceneMeshVertexCount_ = static_cast<uint32_t>(vertices.size());
-    std::cout << "Loaded scene mesh " << resolvedPath << " (" << sceneMeshVertexCount_
-              << " vertices)" << std::endl;
+    std::cout << "Loaded scene mesh " << resolvedPath << " ("
+              << sceneMeshVertexCount_ << " vertices)" << std::endl;
   }
   bool shouldClose() const { return glfwWindowShouldClose(window_); }
   void pollEvents() const { glfwPollEvents(); }
@@ -223,8 +227,8 @@ public:
     info.Queue = graphicsQueue_;
     info.DescriptorPool = imguiDescriptorPool_;
     info.RenderPass = renderPass_;
-    info.MinImageCount = (uint32_t)swapchainImages_.size();
-    info.ImageCount = (uint32_t)swapchainImages_.size();
+    info.MinImageCount = static_cast<uint32_t>(swapchainImages_.size());
+    info.ImageCount = static_cast<uint32_t>(swapchainImages_.size());
     info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     info.CheckVkResultFn = [](VkResult result) {
       if (result != VK_SUCCESS)
@@ -254,24 +258,22 @@ public:
     float frameDt = baseDeltaT_ * fluidSettings_.simulationRate;
     ImGui::Text("Simulated dt/frame: %.4f", frameDt);
     ImGui::Text("Active substeps: %d (dt %.5f)", activeSubsteps,
-                frameDt / float(activeSubsteps));
+                frameDt / static_cast<float>(activeSubsteps));
     {
       SphParams &physics = liveSphParams_;
       ImGui::Separator();
       ImGui::TextUnformatted("Fluid physics");
-      ImGui::SliderFloat("Gravity", &physics.gravity[1], -20.0f, 0.0f,
-                         "%.2f");
+      ImGui::SliderFloat("Gravity", &physics.gravity[1], -20.0f, 0.0f, "%.2f");
       ImGui::SliderFloat("Target density", &physics.targetDensity, 500.0f,
                          4000.0f, "%.0f");
       ImGui::SliderFloat("Pressure stiffness", &physics.pressureMultiplier,
-                         1.0f, 500.0f, "%.1f",
-                         ImGuiSliderFlags_Logarithmic);
+                         1.0f, 500.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
       ImGui::SliderFloat("Near pressure", &physics.gravity[3], 0.0f, 2.0f,
                          "%.3f", ImGuiSliderFlags_Logarithmic);
-      ImGui::SliderFloat("Viscosity", &physics.viscosityStrength, 0.0f,
-                         0.02f, "%.4f");
-      ImGui::SliderFloat("Collision damping", &physics.collisionDamping,
-                         0.0f, 1.0f, "%.2f");
+      ImGui::SliderFloat("Viscosity", &physics.viscosityStrength, 0.0f, 0.02f,
+                         "%.4f");
+      ImGui::SliderFloat("Collision damping", &physics.collisionDamping, 0.0f,
+                         1.0f, "%.2f");
       if (ImGui::Button("Reset water preset")) {
         physics = defaultSphParams_;
         fluidSettings_.simulationSubsteps = 1;
@@ -280,10 +282,10 @@ public:
     }
     ImGui::Separator();
     ImGui::TextUnformatted("Screen-space reconstruction");
-    ImGui::SliderFloat("Render scale", &fluidSettings_.renderScale, 0.5f,
-                       1.0f, "%.2fx");
-    ImGui::SliderFloat("Max blur radius (px)",
-                       &fluidSettings_.maxBlurRadius, 1.0f, 32.0f, "%.1f");
+    ImGui::SliderFloat("Render scale", &fluidSettings_.renderScale, 0.5f, 1.0f,
+                       "%.2fx");
+    ImGui::SliderFloat("Max blur radius (px)", &fluidSettings_.maxBlurRadius,
+                       1.0f, 32.0f, "%.1f");
     ImGui::SliderFloat("Blur strength", &fluidSettings_.blurStrength, 0.05f,
                        2.0f, "%.2f");
     ImGui::SliderFloat("Depth difference strength",
@@ -293,8 +295,7 @@ public:
     ImGui::Separator();
     ImGui::TextUnformatted("Water material");
     ImGui::SliderFloat("Refraction strength",
-                       &fluidSettings_.refractionStrength, 0.0f, 0.30f,
-                       "%.3f");
+                       &fluidSettings_.refractionStrength, 0.0f, 0.30f, "%.3f");
     ImGui::SliderFloat("Absorption scale", &fluidSettings_.absorptionScale,
                        0.0f, 12.0f, "%.2f");
     ImGui::ColorEdit3("Extinction colour", &fluidSettings_.extinctionRed,
@@ -308,11 +309,9 @@ public:
     ImGui::SliderFloat("Sun elevation", &fluidSettings_.sunElevationDegrees,
                        10.0f, 85.0f, "%.0f deg");
     ImGui::SliderFloat("Shadow ambient light",
-                       &fluidSettings_.shadowAmbientLight, 0.0f, 0.75f,
-                       "%.2f");
+                       &fluidSettings_.shadowAmbientLight, 0.0f, 0.75f, "%.2f");
     ImGui::SliderInt("Shadow update interval",
-                     &fluidSettings_.shadowUpdateInterval, 1, 4,
-                     "%d frames");
+                     &fluidSettings_.shadowUpdateInterval, 1, 4, "%d frames");
     ImGui::TextUnformatted("Click and drag outside this panel to orbit.");
     ImGui::End();
   }
@@ -343,10 +342,19 @@ public:
 
   void uploadInitialState(const std::vector<float4> &positions,
                           const std::vector<float4> &velocities) {
-    uint32_t n = std::min<uint32_t>(numParticles_, (uint32_t)positions.size());
-    VkDeviceSize size = n * sizeof(float4);
-    uploadViaStaging(positionsBuf_, positions.data(), size);
-    uploadViaStaging(velocitiesBuf_, velocities.data(), size);
+    const std::size_t expectedCount =
+        static_cast<std::size_t>(numParticles_);
+    if (positions.size() != expectedCount ||
+        velocities.size() != expectedCount) {
+      throw std::runtime_error(
+          "Initial position and velocity counts must match the renderer "
+          "particle count");
+    }
+
+    const VkDeviceSize uploadSize =
+        static_cast<VkDeviceSize>(numParticles_) * sizeof(float4);
+    uploadViaStaging(positionsBuf_, positions.data(), uploadSize);
+    uploadViaStaging(velocitiesBuf_, velocities.data(), uploadSize);
   }
 
   // Advance the simulation `substeps` times on the GPU, then draw one frame.
@@ -400,9 +408,9 @@ public:
     wp.material = float4(fluidSettings_.refractionStrength,
                          fluidSettings_.absorptionScale,
                          fluidSettings_.baseReflectance, 0.0f);
-    wp.extinction = float4(fluidSettings_.extinctionRed,
-                           fluidSettings_.extinctionGreen,
-                           fluidSettings_.extinctionBlue, 0.0f);
+    wp.extinction =
+        float4(fluidSettings_.extinctionRed, fluidSettings_.extinctionGreen,
+               fluidSettings_.extinctionBlue, 0.0f);
 
     if (imguiInitialized_)
       ImGui::Render();
@@ -796,7 +804,7 @@ private:
     ci.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 #endif
     ci.pApplicationInfo = &app;
-    ci.enabledExtensionCount = (uint32_t)extensions.size();
+    ci.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     ci.ppEnabledExtensionNames = extensions.data();
     vkCheck(vkCreateInstance(&ci, nullptr, &instance_), "vkCreateInstance");
   }
@@ -831,6 +839,15 @@ private:
     return q;
   }
 
+  static bool supportsComputeWorkgroupSize(VkPhysicalDevice device) {
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(device, &properties);
+    return properties.limits.maxComputeWorkGroupInvocations >=
+               kComputeWorkgroupSize &&
+           properties.limits.maxComputeWorkGroupSize[0] >=
+               kComputeWorkgroupSize;
+  }
+
   void pickPhysicalDevice() {
     uint32_t count = 0;
     vkEnumeratePhysicalDevices(instance_, &count, nullptr);
@@ -840,7 +857,7 @@ private:
     vkEnumeratePhysicalDevices(instance_, &count, devices.data());
     for (auto dev : devices) {
       QueueFamilies q = findQueueFamilies(dev);
-      if (q.complete()) {
+      if (q.complete() && supportsComputeWorkgroupSize(dev)) {
         physicalDevice_ = dev;
         graphicsFamily_ = *q.graphics;
         presentFamily_ = *q.present;
@@ -848,7 +865,10 @@ private:
       }
     }
     if (physicalDevice_ == VK_NULL_HANDLE)
-      throw std::runtime_error("No suitable GPU found");
+      throw std::runtime_error(
+          "No suitable GPU found with support for " +
+          std::to_string(kComputeWorkgroupSize) +
+          "-thread compute workgroups");
   }
 
   void createLogicalDevice() {
@@ -890,10 +910,10 @@ private:
 
     VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     ci.pNext = &features14;
-    ci.queueCreateInfoCount = (uint32_t)queueInfos.size();
+    ci.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
     ci.pQueueCreateInfos = queueInfos.data();
     ci.pEnabledFeatures = nullptr; // features supplied via pNext
-    ci.enabledExtensionCount = (uint32_t)deviceExts.size();
+    ci.enabledExtensionCount = static_cast<uint32_t>(deviceExts.size());
     ci.ppEnabledExtensionNames = deviceExts.data();
     vkCheck(vkCreateDevice(physicalDevice_, &ci, nullptr, &device_),
             "vkCreateDevice");
@@ -938,7 +958,7 @@ private:
       return caps.currentExtent;
     int w, h;
     glfwGetFramebufferSize(window_, &w, &h);
-    VkExtent2D e{(uint32_t)w, (uint32_t)h};
+    VkExtent2D e{static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
     e.width = std::max(caps.minImageExtent.width,
                        std::min(caps.maxImageExtent.width, e.width));
     e.height = std::max(caps.minImageExtent.height,
@@ -993,7 +1013,7 @@ private:
 
   void createImageViews() {
     swapchainImageViews_.resize(swapchainImages_.size());
-    for (size_t i = 0; i < swapchainImages_.size(); i++) {
+    for (std::size_t i = 0; i < swapchainImages_.size(); i++) {
       VkImageViewCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
       ci.image = swapchainImages_[i];
       ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -1051,7 +1071,7 @@ private:
 
     std::array<VkAttachmentDescription, 2> attachments = {color, depth};
     VkRenderPassCreateInfo ci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    ci.attachmentCount = (uint32_t)attachments.size();
+    ci.attachmentCount = static_cast<uint32_t>(attachments.size());
     ci.pAttachments = attachments.data();
     ci.subpassCount = 1;
     ci.pSubpasses = &subpass;
@@ -1063,18 +1083,16 @@ private:
 
   void createSceneTargets() {
     sceneColorFormat_ = swapchainFormat_;
-    createImage2D(sceneColorFormat_,
-                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                      VK_IMAGE_USAGE_SAMPLED_BIT,
-                  VK_IMAGE_ASPECT_COLOR_BIT, sceneColorImage_, sceneColorMem_,
-                  sceneColorView_, swapchainExtent_.width,
-                  swapchainExtent_.height);
-    createImage2D(sceneDepthFormat_,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-              VK_IMAGE_USAGE_SAMPLED_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT, sceneDepthImage_, sceneDepthMem_,
-            sceneDepthView_, swapchainExtent_.width,
-            swapchainExtent_.height);
+    createImage2D(
+        sceneColorFormat_,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT, sceneColorImage_, sceneColorMem_,
+        sceneColorView_, swapchainExtent_.width, swapchainExtent_.height);
+    createImage2D(
+        sceneDepthFormat_,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT, sceneDepthImage_, sceneDepthMem_,
+        sceneDepthView_, swapchainExtent_.width, swapchainExtent_.height);
     createImage2D(depthFormat_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                   VK_IMAGE_ASPECT_DEPTH_BIT, sceneZImage_, sceneZMem_,
                   sceneZView_, swapchainExtent_.width, swapchainExtent_.height);
@@ -1119,9 +1137,12 @@ private:
       sceneZ.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
       sceneZ.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
       sceneZ.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-      VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-      VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-      VkAttachmentReference sceneZRef{2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+      VkAttachmentReference colorRef{0,
+                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+      VkAttachmentReference depthRef{1,
+                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+      VkAttachmentReference sceneZRef{
+          2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
       std::array<VkAttachmentReference, 2> colorRefs = {colorRef, depthRef};
       VkSubpassDescription subpass{};
       subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -1137,7 +1158,7 @@ private:
       dep.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
       VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
       std::array<VkAttachmentDescription, 3> atts = {color, depth, sceneZ};
-      rp.attachmentCount = (uint32_t)atts.size();
+      rp.attachmentCount = static_cast<uint32_t>(atts.size());
       rp.pAttachments = atts.data();
       rp.subpassCount = 1;
       rp.pSubpasses = &subpass;
@@ -1156,9 +1177,9 @@ private:
     if (environmentImage_)
       return;
 
-    std::vector<std::string> candidates = {
-        "media/uffizi_probe.hdr", "../media/uffizi_probe.hdr",
-        "../../media/uffizi_probe.hdr"};
+    std::vector<std::string> candidates = {"media/uffizi_probe.hdr",
+                                           "../media/uffizi_probe.hdr",
+                                           "../../media/uffizi_probe.hdr"};
     int width = 0;
     int height = 0;
     int comp = 0;
@@ -1174,20 +1195,30 @@ private:
     if (!src) {
       width = 1024;
       height = 512;
-      fallback.resize((size_t)width * (size_t)height * 4u);
+      fallback.resize(static_cast<std::size_t>(width) *
+                      static_cast<std::size_t>(height) * 4u);
       for (int y = 0; y < height; ++y) {
-        float v = float(y) / float(height - 1);
+        const float v =
+            static_cast<float>(y) / static_cast<float>(height - 1);
         for (int x = 0; x < width; ++x) {
-          float u = float(x) / float(width - 1);
+          const float u =
+              static_cast<float>(x) / static_cast<float>(width - 1);
           float horizon = 1.0f - std::abs(v * 2.0f - 1.0f);
           horizon = std::clamp(horizon, 0.0f, 1.0f);
           float3 top = float3(0.18f, 0.34f, 0.62f);
           float3 bottom = float3(0.02f, 0.05f, 0.10f);
           float3 c = bottom * (1.0f - horizon) + top * horizon;
-          float sun = std::pow(std::max(0.0f, 1.0f - std::abs(u - 0.35f) * 12.0f), 4.0f) *
-                      std::pow(std::max(0.0f, 1.0f - std::abs(v - 0.22f) * 20.0f), 4.0f);
+          float sun =
+              std::pow(std::max(0.0f, 1.0f - std::abs(u - 0.35f) * 12.0f),
+                       4.0f) *
+              std::pow(std::max(0.0f, 1.0f - std::abs(v - 0.22f) * 20.0f),
+                       4.0f);
           c += float3(1.0f, 0.92f, 0.78f) * sun * 2.0f;
-          size_t idx = (size_t(y) * (size_t)width + size_t(x)) * 4u;
+          const std::size_t idx =
+              (static_cast<std::size_t>(y) *
+                   static_cast<std::size_t>(width) +
+               static_cast<std::size_t>(x)) *
+              4u;
           fallback[idx + 0] = c.x;
           fallback[idx + 1] = c.y;
           fallback[idx + 2] = c.z;
@@ -1197,14 +1228,17 @@ private:
       src = fallback.data();
     }
 
-    VkDeviceSize imageSize = VkDeviceSize(width) * VkDeviceSize(height) * 4u * sizeof(float);
+    const VkDeviceSize imageSize =
+        static_cast<VkDeviceSize>(width) *
+        static_cast<VkDeviceSize>(height) * 4u * sizeof(float);
     AllocatedBuffer staging;
     createHostBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, src, staging,
                      "environment staging buffer");
 
     VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ci.imageType = VK_IMAGE_TYPE_2D;
-    ci.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+    ci.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+                 1};
     ci.mipLevels = 1;
     ci.arrayLayers = 1;
     ci.format = VK_FORMAT_R32G32B32A32_SFLOAT;
@@ -1236,10 +1270,9 @@ private:
     submitOneTimeCommands(
         pool,
         [&](VkCommandBuffer commandBuffer) {
-          transitionImageLayout(commandBuffer, environmentImage_,
-                                VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                VK_IMAGE_ASPECT_COLOR_BIT);
+          transitionImageLayout(
+              commandBuffer, environmentImage_, VK_IMAGE_LAYOUT_UNDEFINED,
+              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
           copyBufferToImage(commandBuffer, staging, environmentImage_,
                             static_cast<uint32_t>(width),
                             static_cast<uint32_t>(height));
@@ -1341,7 +1374,7 @@ private:
 
   void createFramebuffers() {
     framebuffers_.resize(swapchainImageViews_.size());
-    for (size_t i = 0; i < swapchainImageViews_.size(); i++) {
+    for (std::size_t i = 0; i < swapchainImageViews_.size(); i++) {
       createFramebuffer(renderPass_, {swapchainImageViews_[i], depthView_},
                         swapchainExtent_, framebuffers_[i],
                         "create swapchain framebuffer");
@@ -1352,7 +1385,8 @@ private:
     std::ifstream file(path, std::ios::ate | std::ios::binary);
     if (!file.is_open())
       throw std::runtime_error("Failed to open shader file: " + path);
-    size_t size = (size_t)file.tellg();
+    const std::size_t size =
+        static_cast<std::size_t>(file.tellg());
     std::vector<char> buffer(size);
     file.seekg(0);
     file.read(buffer.data(), size);
@@ -1414,7 +1448,7 @@ private:
 
     void *mapped = nullptr;
     vkCheck(vkMapMemory(device_, buffer.memory, 0, size, 0, &mapped), label);
-    std::memcpy(mapped, initialData, static_cast<size_t>(size));
+    std::memcpy(mapped, initialData, static_cast<std::size_t>(size));
     vkUnmapMemory(device_, buffer.memory);
   }
 
@@ -1422,14 +1456,13 @@ private:
   void createMappedUniformBuffer(AllocatedBuffer &buffer, const char *label) {
     createHostBuffer(sizeof(T), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, nullptr,
                      buffer, label);
-    vkCheck(vkMapMemory(device_, buffer.memory, 0, sizeof(T), 0,
-                        &buffer.mapped),
-            label);
+    vkCheck(
+        vkMapMemory(device_, buffer.memory, 0, sizeof(T), 0, &buffer.mapped),
+        label);
   }
 
   void createPipelineLayout(VkDescriptorSetLayout descriptorLayout,
-                            VkPipelineLayout &pipelineLayout,
-                            const char *label,
+                            VkPipelineLayout &pipelineLayout, const char *label,
                             VkShaderStageFlags pushConstantStages = 0,
                             uint32_t pushConstantSize = 0) {
     VkPushConstantRange pushConstants{};
@@ -1481,8 +1514,8 @@ private:
         -1.f, -1.f, 1.f, -1.f, -1.f, 1.f, 1.f, 1.f,
     };
     VkDeviceSize size = sizeof(quad);
-    createHostBuffer(size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, quad,
-                     quadBuffer_, "quad vertex buffer");
+    createHostBuffer(size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, quad, quadBuffer_,
+                     "quad vertex buffer");
   }
 
   void createComputeBuffers() {
@@ -1553,10 +1586,10 @@ private:
     return {binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, stages};
   }
 
-  void createDescriptorPool(
-      std::initializer_list<VkDescriptorPoolSize> sizes, uint32_t maxSets,
-      VkDescriptorPool &pool, const char *label,
-      VkDescriptorPoolCreateFlags flags = 0) {
+  void createDescriptorPool(std::initializer_list<VkDescriptorPoolSize> sizes,
+                            uint32_t maxSets, VkDescriptorPool &pool,
+                            const char *label,
+                            VkDescriptorPoolCreateFlags flags = 0) {
     VkDescriptorPoolCreateInfo info{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     info.flags = flags;
@@ -1566,7 +1599,7 @@ private:
     vkCheck(vkCreateDescriptorPool(device_, &info, nullptr, &pool), label);
   }
 
-  template <size_t N>
+  template <std::size_t N>
   std::array<VkDescriptorSet, N>
   allocateDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout,
                          const char *label) {
@@ -1582,11 +1615,11 @@ private:
     return sets;
   }
 
-  template <size_t N>
-  std::array<VkDescriptorSet, N> createDescriptorSets(
-      std::initializer_list<DescriptorBinding> bindings,
-      VkDescriptorSetLayout &layout, VkDescriptorPool &pool,
-      const char *label) {
+  template <std::size_t N>
+  std::array<VkDescriptorSet, N>
+  createDescriptorSets(std::initializer_list<DescriptorBinding> bindings,
+                       VkDescriptorSetLayout &layout, VkDescriptorPool &pool,
+                       const char *label) {
     std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
     std::vector<VkDescriptorPoolSize> poolSizes;
     layoutBindings.reserve(bindings.size());
@@ -1594,9 +1627,8 @@ private:
       layoutBindings.push_back(
           {binding.binding, binding.type, 1, binding.stages, nullptr});
       auto poolSize =
-          std::find_if(poolSizes.begin(), poolSizes.end(), [&](const auto &p) {
-            return p.type == binding.type;
-          });
+          std::find_if(poolSizes.begin(), poolSizes.end(),
+                       [&](const auto &p) { return p.type == binding.type; });
       if (poolSize == poolSizes.end())
         poolSizes.push_back({binding.type, static_cast<uint32_t>(N)});
       else
@@ -1632,8 +1664,9 @@ private:
     return {binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer};
   }
 
-  static BufferDescriptorBinding uniformDescriptor(
-      uint32_t binding, VkBuffer buffer, VkDeviceSize range = VK_WHOLE_SIZE) {
+  static BufferDescriptorBinding
+  uniformDescriptor(uint32_t binding, VkBuffer buffer,
+                    VkDeviceSize range = VK_WHOLE_SIZE) {
     return {binding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer, range};
   }
 
@@ -1642,7 +1675,7 @@ private:
       std::initializer_list<BufferDescriptorBinding> descriptors) {
     std::vector<VkDescriptorBufferInfo> infos(descriptors.size());
     std::vector<VkWriteDescriptorSet> writes(descriptors.size());
-    size_t i = 0;
+    std::size_t i = 0;
     for (const auto &descriptor : descriptors) {
       infos[i] = {descriptor.buffer, descriptor.offset, descriptor.range};
       writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -1669,7 +1702,7 @@ private:
       std::initializer_list<ImageDescriptorWrite> descriptors) {
     std::vector<VkDescriptorImageInfo> infos(descriptors.size());
     std::vector<VkWriteDescriptorSet> writes(descriptors.size());
-    size_t i = 0;
+    std::size_t i = 0;
     for (const auto &descriptor : descriptors) {
       infos[i] = {descriptor.sampler, descriptor.view, descriptor.layout};
       writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -1700,21 +1733,22 @@ private:
         "create compute descriptor sets");
 
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
-      writeBufferDescriptors(descriptorSets_[i], {
-          storageDescriptor(0, positionsBuf_),
-          storageDescriptor(1, velocitiesBuf_),
-          storageDescriptor(2, predictedBuf_),
-          storageDescriptor(3, densitiesBuf_),
-          uniformDescriptor(5, paramsBuffers_[i]),
-          storageDescriptor(6, keysBuf_),
-          storageDescriptor(7, indicesBuf_),
-          storageDescriptor(8, startBuf_),
-          storageDescriptor(9, sortedPosBuf_),
-          storageDescriptor(10, sortedVelBuf_),
-          storageDescriptor(11, sortedPredBuf_),
-          uniformDescriptor(12, interactionBuffers_[i]),
-          storageDescriptor(13, endBuf_),
-      });
+      writeBufferDescriptors(descriptorSets_[i],
+                             {
+                                 storageDescriptor(0, positionsBuf_),
+                                 storageDescriptor(1, velocitiesBuf_),
+                                 storageDescriptor(2, predictedBuf_),
+                                 storageDescriptor(3, densitiesBuf_),
+                                 uniformDescriptor(5, paramsBuffers_[i]),
+                                 storageDescriptor(6, keysBuf_),
+                                 storageDescriptor(7, indicesBuf_),
+                                 storageDescriptor(8, startBuf_),
+                                 storageDescriptor(9, sortedPosBuf_),
+                                 storageDescriptor(10, sortedVelBuf_),
+                                 storageDescriptor(11, sortedPredBuf_),
+                                 uniformDescriptor(12, interactionBuffers_[i]),
+                                 storageDescriptor(13, endBuf_),
+                             });
     }
   }
 
@@ -1795,8 +1829,7 @@ private:
   }
 
   void transitionImageLayout(VkCommandBuffer cmd, VkImage image,
-                             VkImageLayout oldLayout,
-                             VkImageLayout newLayout,
+                             VkImageLayout oldLayout, VkImageLayout newLayout,
                              VkImageAspectFlags aspect) {
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.oldLayout = oldLayout;
@@ -1837,19 +1870,18 @@ private:
 
   void createImGuiDescriptorPool() {
     createDescriptorPool({{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32}}, 32,
-                         imguiDescriptorPool_,
-                         "vkCreateDescriptorPool(imgui)",
+                         imguiDescriptorPool_, "vkCreateDescriptorPool(imgui)",
                          VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
   }
 
   void createFluidTargets() {
     activeRenderScale_ = std::clamp(fluidSettings_.renderScale, 0.5f, 1.0f);
-    fluidExtent_.width = std::max(
-        1u, static_cast<uint32_t>(std::lround(swapchainExtent_.width *
-                                              activeRenderScale_)));
-    fluidExtent_.height = std::max(
-        1u, static_cast<uint32_t>(std::lround(swapchainExtent_.height *
-                                              activeRenderScale_)));
+    fluidExtent_.width =
+        std::max(1u, static_cast<uint32_t>(std::lround(swapchainExtent_.width *
+                                                       activeRenderScale_)));
+    fluidExtent_.height =
+        std::max(1u, static_cast<uint32_t>(std::lround(swapchainExtent_.height *
+                                                       activeRenderScale_)));
     waterShadowValid_ = false;
     createImage2D(fluidDepthFormat_,
                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
@@ -1922,22 +1954,21 @@ private:
     }
 
     // blur target
-    createImage2D(
-        fluidDepthFormat_,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT, blurTempImage_, blurTempMem_, blurTempView_,
-        fluidExtent_.width, fluidExtent_.height);
+    createImage2D(fluidDepthFormat_,
+                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_SAMPLED_BIT,
+                  VK_IMAGE_ASPECT_COLOR_BIT, blurTempImage_, blurTempMem_,
+                  blurTempView_, fluidExtent_.width, fluidExtent_.height);
     createImage2D(fluidDepthFormat_,
                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                       VK_IMAGE_USAGE_SAMPLED_BIT,
                   VK_IMAGE_ASPECT_COLOR_BIT, blurSmoothImage_, blurSmoothMem_,
                   blurSmoothView_, fluidExtent_.width, fluidExtent_.height);
-    createImage2D(fluidDepthFormat_,
-                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                      VK_IMAGE_USAGE_SAMPLED_BIT,
-                  VK_IMAGE_ASPECT_COLOR_BIT, fluidThicknessImage_,
-                  fluidThicknessMem_, fluidThicknessView_, fluidExtent_.width,
-                  fluidExtent_.height);
+    createImage2D(
+        fluidDepthFormat_,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT, fluidThicknessImage_, fluidThicknessMem_,
+        fluidThicknessView_, fluidExtent_.width, fluidExtent_.height);
     createImage2D(fluidDepthFormat_,
                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                       VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -1947,15 +1978,13 @@ private:
     createImage2D(fluidDepthFormat_,
                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                       VK_IMAGE_USAGE_SAMPLED_BIT,
-                  VK_IMAGE_ASPECT_COLOR_BIT, waterShadowImage_,
-                  waterShadowMem_, waterShadowView_, kWaterShadowMapSize,
-                  kWaterShadowMapSize);
-    createImage2D(fluidDepthFormat_,
-                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                      VK_IMAGE_USAGE_SAMPLED_BIT,
-                  VK_IMAGE_ASPECT_COLOR_BIT, waterShadowDepthImage_,
-                  waterShadowDepthMem_, waterShadowDepthView_,
-                  kWaterShadowMapSize, kWaterShadowMapSize);
+                  VK_IMAGE_ASPECT_COLOR_BIT, waterShadowImage_, waterShadowMem_,
+                  waterShadowView_, kWaterShadowMapSize, kWaterShadowMapSize);
+    createImage2D(
+        fluidDepthFormat_,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT, waterShadowDepthImage_, waterShadowDepthMem_,
+        waterShadowDepthView_, kWaterShadowMapSize, kWaterShadowMapSize);
     createImage2D(depthFormat_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                   VK_IMAGE_ASPECT_DEPTH_BIT, waterShadowZImage_,
                   waterShadowZMem_, waterShadowZView_, kWaterShadowMapSize,
@@ -1996,15 +2025,14 @@ private:
 
     createFramebuffer(blurPass_, {blurTempView_}, fluidExtent_, blurTempFB_,
                       "create horizontal blur framebuffer");
-    createFramebuffer(blurPass_, {blurSmoothView_}, fluidExtent_,
-                      blurSmoothFB_, "create vertical blur framebuffer");
+    createFramebuffer(blurPass_, {blurSmoothView_}, fluidExtent_, blurSmoothFB_,
+                      "create vertical blur framebuffer");
     createFramebuffer(blurPass_, {fluidThicknessView_}, fluidExtent_,
                       fluidThicknessFB_, "create thickness framebuffer");
     createFramebuffer(blurPass_, {thicknessBlurTempView_}, fluidExtent_,
                       thicknessBlurTempFB_,
                       "create thickness blur framebuffer");
-    constexpr VkExtent2D shadowExtent{kWaterShadowMapSize,
-                                      kWaterShadowMapSize};
+    constexpr VkExtent2D shadowExtent{kWaterShadowMapSize, kWaterShadowMapSize};
     createFramebuffer(blurPass_, {waterShadowView_}, shadowExtent,
                       waterShadowFB_, "create water shadow framebuffer");
     createFramebuffer(fluidDepthPass_,
@@ -2023,11 +2051,10 @@ private:
     VkVertexInputBindingDescription bind{0, sizeof(float) * 2,
                                          VK_VERTEX_INPUT_RATE_VERTEX};
     VkVertexInputAttributeDescription attr{0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
-    depthPipeline_ =
-        buildGraphicsPipeline("fluid_depth.vert.spv", "fluid_depth.frag.spv",
-                              fluidDepthPass_, depthPipelineLayout_, &bind,
-                              &attr, /*attrCount*/ 1, /*depthTest*/ true, 1,
-                              false, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
+    depthPipeline_ = buildGraphicsPipeline(
+        "fluid_depth.vert.spv", "fluid_depth.frag.spv", fluidDepthPass_,
+        depthPipelineLayout_, &bind, &attr, /*attrCount*/ 1, /*depthTest*/ true,
+        1, false, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
 
     constexpr VkShaderStageFlags fragment = VK_SHADER_STAGE_FRAGMENT_BIT;
     const auto sets = createDescriptorSets<kMaxFramesInFlight + 5>(
@@ -2064,14 +2091,14 @@ private:
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
 
     backgroundPipeline_ = buildGraphicsPipeline(
-      "fullscreen.vert.spv", "scene_background.frag.spv", scenePass_,
-      compositePipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false, 2);
+        "fullscreen.vert.spv", "scene_background.frag.spv", scenePass_,
+        compositePipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false, 2);
 
     createPipelineLayout(compositeSetLayout_, sceneMeshPipelineLayout_,
                          "create scene mesh pipeline layout",
                          VK_SHADER_STAGE_VERTEX_BIT, sizeof(ScenePush));
     VkVertexInputBindingDescription sceneBind{0, sizeof(SceneVertex),
-                                               VK_VERTEX_INPUT_RATE_VERTEX};
+                                              VK_VERTEX_INPUT_RATE_VERTEX};
     std::array<VkVertexInputAttributeDescription, 6> sceneAttr = {{
         {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(SceneVertex, position)},
         {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(SceneVertex, normal)},
@@ -2083,7 +2110,7 @@ private:
     sceneMeshPipeline_ = buildGraphicsPipeline(
         "scene_mesh.vert.spv", "scene_mesh.frag.spv", scenePass_,
         sceneMeshPipelineLayout_, &sceneBind, sceneAttr.data(),
-        (uint32_t)sceneAttr.size(), /*depthTest*/ true, 2);
+        static_cast<uint32_t>(sceneAttr.size()), /*depthTest*/ true, 2);
     compositePipeline_ = buildGraphicsPipeline(
         "fullscreen.vert.spv", "fluid_composite.frag.spv", renderPass_,
         compositePipelineLayout_, nullptr, nullptr, 0, /*depthTest*/ false);
@@ -2098,10 +2125,11 @@ private:
         {thicknessBlurSetV_, 0, thicknessBlurTempView_, fluidSampler_},
     });
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
-      writeBufferDescriptors(compositeSets_[i], {
-          uniformDescriptor(6, sceneLightingBuffers_[i],
-                            sizeof(SceneLightingParams)),
-      });
+      writeBufferDescriptors(compositeSets_[i],
+                             {
+                                 uniformDescriptor(6, sceneLightingBuffers_[i],
+                                                   sizeof(SceneLightingParams)),
+                             });
       writeImageDescriptors({
           {compositeSets_[i], 0, blurSmoothView_, fluidSampler_},
           {compositeSets_[i], 1, sceneColorView_, sceneSampler_},
@@ -2114,16 +2142,13 @@ private:
     }
   }
 
-  VkPipeline
-  buildGraphicsPipeline(const char *vertSpv, const char *fragSpv,
-                        VkRenderPass pass, VkPipelineLayout layout,
-                        const VkVertexInputBindingDescription *bind,
-                        const VkVertexInputAttributeDescription *attr,
-                        uint32_t attrCount, bool depthTest,
-                        uint32_t colorAttachmentCount = 1,
-                        bool additiveBlend = false,
-                        VkPrimitiveTopology topology =
-                            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) {
+  VkPipeline buildGraphicsPipeline(
+      const char *vertSpv, const char *fragSpv, VkRenderPass pass,
+      VkPipelineLayout layout, const VkVertexInputBindingDescription *bind,
+      const VkVertexInputAttributeDescription *attr, uint32_t attrCount,
+      bool depthTest, uint32_t colorAttachmentCount = 1,
+      bool additiveBlend = false,
+      VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) {
     VkShaderModule vert =
         createShaderModule(readFile(std::string(SHADER_DIR) + "/" + vertSpv));
     VkShaderModule frag =
@@ -2177,10 +2202,9 @@ private:
 
     std::vector<VkPipelineColorBlendAttachmentState> cba(colorAttachmentCount);
     for (auto &attachment : cba) {
-      attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
-                                  VK_COLOR_COMPONENT_G_BIT |
-                                  VK_COLOR_COMPONENT_B_BIT |
-                                  VK_COLOR_COMPONENT_A_BIT;
+      attachment.colorWriteMask =
+          VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
       attachment.blendEnable = additiveBlend ? VK_TRUE : VK_FALSE;
       if (additiveBlend) {
         attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -2200,7 +2224,7 @@ private:
                                                VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dyn{
         VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dyn.dynamicStateCount = (uint32_t)dynStates.size();
+    dyn.dynamicStateCount = static_cast<uint32_t>(dynStates.size());
     dyn.pDynamicStates = dynStates.data();
 
     VkGraphicsPipelineCreateInfo ci{
@@ -2287,6 +2311,11 @@ private:
                          0, nullptr, 1, &b);
   }
 
+  static constexpr uint32_t dispatchGroupCount(uint32_t elementCount) {
+    return (elementCount + kComputeWorkgroupSize - 1u) /
+           kComputeWorkgroupSize;
+  }
+
   void dispatchStage(VkCommandBuffer cmd, VkPipeline pipeline, uint32_t groups,
                      bool barrierAfter = true) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
@@ -2312,8 +2341,8 @@ private:
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkCheck(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer");
 
-    const uint32_t groupsN = (numParticles_ + 255u) / 256u;
-    const uint32_t groupsGrid = (gridCellCount_ + 255u) / 256u;
+    const uint32_t groupsN = dispatchGroupCount(numParticles_);
+    const uint32_t groupsGrid = dispatchGroupCount(gridCellCount_);
     VkDescriptorSet computeSet = descriptorSets_[currentFrame_];
     VkDescriptorSet compositeSet = compositeSets_[currentFrame_];
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -2344,21 +2373,27 @@ private:
 
     VkViewport viewport{0.0f,
                         0.0f,
-                        (float)swapchainExtent_.width,
-                        (float)swapchainExtent_.height,
+                        static_cast<float>(swapchainExtent_.width),
+                        static_cast<float>(swapchainExtent_.height),
                         0.0f,
                         1.0f};
     VkRect2D scissor{{0, 0}, swapchainExtent_};
-    VkViewport fluidViewport{0.0f, 0.0f, (float)fluidExtent_.width,
-                             (float)fluidExtent_.height, 0.0f, 1.0f};
+    VkViewport fluidViewport{0.0f,
+                             0.0f,
+                             static_cast<float>(fluidExtent_.width),
+                             static_cast<float>(fluidExtent_.height),
+                             0.0f,
+                             1.0f};
     VkRect2D fluidScissor{{0, 0}, fluidExtent_};
 
     // Render water thickness from the lights view.
-    const float azimuth = fluidSettings_.sunAzimuthDegrees * 0.01745329252f;
-    const float elevation = fluidSettings_.sunElevationDegrees * 0.01745329252f;
-    const float3 sunDir = normalize(float3(std::cos(elevation) * std::cos(azimuth),
-                                           std::sin(elevation),
-                                           std::cos(elevation) * std::sin(azimuth)));
+    const float azimuth =
+        fluidSettings_.sunAzimuthDegrees * kDegreesToRadians;
+    const float elevation =
+        fluidSettings_.sunElevationDegrees * kDegreesToRadians;
+    const float3 sunDir = normalize(
+        float3(std::cos(elevation) * std::cos(azimuth), std::sin(elevation),
+               std::cos(elevation) * std::sin(azimuth)));
     const float3 lightForward = -sunDir;
     const float3 lightRight = normalize(cross(lightForward, float3(0, 1, 0)));
     const float3 lightUp = cross(lightRight, lightForward);
@@ -2379,17 +2414,16 @@ private:
     lighting.lightVP = linalg::mul(lightProj, lightView);
     lighting.lightView = lightView;
     lighting.sunDirection = float4(sunDir, 0.0f);
-    lighting.extinction = float4(fluidSettings_.extinctionRed,
-                                 fluidSettings_.extinctionGreen,
-                                 fluidSettings_.extinctionBlue, 0.0f) *
-                          fluidSettings_.absorptionScale;
+    lighting.extinction =
+        float4(fluidSettings_.extinctionRed, fluidSettings_.extinctionGreen,
+               fluidSettings_.extinctionBlue, 0.0f) *
+        fluidSettings_.absorptionScale;
     lighting.shadowParams = float4(fluidSettings_.shadowAmbientLight, 0, 0, 0);
     std::memcpy(sceneLightingBuffers_[currentFrame_].mapped, &lighting,
                 sizeof(lighting));
     const float shadowSize = static_cast<float>(kWaterShadowMapSize);
     VkViewport shadowViewport{0.0f, 0.0f, shadowSize, shadowSize, 0.0f, 1.0f};
-    VkRect2D shadowScissor{{0, 0},
-                           {kWaterShadowMapSize, kWaterShadowMapSize}};
+    VkRect2D shadowScissor{{0, 0}, {kWaterShadowMapSize, kWaterShadowMapSize}};
     DepthPush shadowDp{};
     shadowDp.view = lightView;
     shadowDp.proj = lightProj;
@@ -2397,77 +2431,83 @@ private:
     shadowDp.camUp = float4(lightUp, 0);
     shadowDp.params = dp.params;
 
-    const int shadowInterval =
-        std::max(fluidSettings_.shadowUpdateInterval, 1);
+    const int shadowInterval = std::max(fluidSettings_.shadowUpdateInterval, 1);
     const bool updateWaterShadow =
         !waterShadowValid_ || (renderedFrameCount_ % shadowInterval == 0) ||
-        std::abs(fluidSettings_.sunAzimuthDegrees - shadowSunAzimuth_) > 0.01f ||
-        std::abs(fluidSettings_.sunElevationDegrees - shadowSunElevation_) > 0.01f;
+        std::abs(fluidSettings_.sunAzimuthDegrees - shadowSunAzimuth_) >
+            0.01f ||
+        std::abs(fluidSettings_.sunElevationDegrees - shadowSunElevation_) >
+            0.01f;
     if (updateWaterShadow) {
-    std::array<VkClearValue, 2> shadowDepthClears{};
-    shadowDepthClears[0].color = {{1.0e4f, 0, 0, 0}};
-    shadowDepthClears[1].depthStencil = {1.0f, 0};
-    VkRenderPassBeginInfo shadowDepthRp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    shadowDepthRp.renderPass = fluidDepthPass_;
-    shadowDepthRp.framebuffer = waterShadowDepthFB_;
-    shadowDepthRp.renderArea.extent = {kWaterShadowMapSize,
-                                       kWaterShadowMapSize};
-    shadowDepthRp.clearValueCount = (uint32_t)shadowDepthClears.size();
-    shadowDepthRp.pClearValues = shadowDepthClears.data();
-    vkCmdBeginRenderPass(cmd, &shadowDepthRp, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, depthPipeline_);
-    vkCmdSetViewport(cmd, 0, 1, &shadowViewport);
-    vkCmdSetScissor(cmd, 0, 1, &shadowScissor);
-    vkCmdPushConstants(cmd, depthPipelineLayout_,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(DepthPush), &shadowDp);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            depthPipelineLayout_, 0, 1, &computeSet, 0,
-                            nullptr);
-    VkBuffer shadowDepthVB[] = {quadBuffer_};
-    VkDeviceSize shadowDepthOffsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, shadowDepthVB, shadowDepthOffsets);
-    if (numParticles_ > 0)
-      vkCmdDraw(cmd, 4, numParticles_, 0, 0);
-    vkCmdEndRenderPass(cmd);
-    colorToSampledBarrier(cmd, waterShadowDepthImage_);
+      std::array<VkClearValue, 2> shadowDepthClears{};
+      shadowDepthClears[0].color = {{kNoSurfaceDepth, 0, 0, 0}};
+      shadowDepthClears[1].depthStencil = {1.0f, 0};
+      VkRenderPassBeginInfo shadowDepthRp{
+          VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+      shadowDepthRp.renderPass = fluidDepthPass_;
+      shadowDepthRp.framebuffer = waterShadowDepthFB_;
+      shadowDepthRp.renderArea.extent = {kWaterShadowMapSize,
+                                         kWaterShadowMapSize};
+      shadowDepthRp.clearValueCount =
+          static_cast<uint32_t>(shadowDepthClears.size());
+      shadowDepthRp.pClearValues = shadowDepthClears.data();
+      vkCmdBeginRenderPass(cmd, &shadowDepthRp, VK_SUBPASS_CONTENTS_INLINE);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, depthPipeline_);
+      vkCmdSetViewport(cmd, 0, 1, &shadowViewport);
+      vkCmdSetScissor(cmd, 0, 1, &shadowScissor);
+      vkCmdPushConstants(cmd, depthPipelineLayout_,
+                         VK_SHADER_STAGE_VERTEX_BIT |
+                             VK_SHADER_STAGE_FRAGMENT_BIT,
+                         0, sizeof(DepthPush), &shadowDp);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              depthPipelineLayout_, 0, 1, &computeSet, 0,
+                              nullptr);
+      VkBuffer shadowDepthVB[] = {quadBuffer_};
+      VkDeviceSize shadowDepthOffsets[] = {0};
+      vkCmdBindVertexBuffers(cmd, 0, 1, shadowDepthVB, shadowDepthOffsets);
+      if (numParticles_ > 0)
+        vkCmdDraw(cmd, 4, numParticles_, 0, 0);
+      vkCmdEndRenderPass(cmd);
+      colorToSampledBarrier(cmd, waterShadowDepthImage_);
 
-    VkClearValue shadowClear{};
-    shadowClear.color = {{0, 0, 0, 0}};
-    VkRenderPassBeginInfo shadowRp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    shadowRp.renderPass = blurPass_;
-    shadowRp.framebuffer = waterShadowFB_;
-    shadowRp.renderArea.extent = {kWaterShadowMapSize, kWaterShadowMapSize};
-    shadowRp.clearValueCount = 1;
-    shadowRp.pClearValues = &shadowClear;
-    vkCmdBeginRenderPass(cmd, &shadowRp, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, thicknessPipeline_);
-    vkCmdSetViewport(cmd, 0, 1, &shadowViewport);
-    vkCmdSetScissor(cmd, 0, 1, &shadowScissor);
-    vkCmdPushConstants(cmd, depthPipelineLayout_,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(DepthPush), &shadowDp);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            depthPipelineLayout_, 0, 1, &computeSet, 0,
-                            nullptr);
-    VkBuffer shadowVB[] = {quadBuffer_};
-    VkDeviceSize shadowOffsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, shadowVB, shadowOffsets);
-    if (numParticles_ > 0)
-      vkCmdDraw(cmd, 4, numParticles_, 0, 0);
-    vkCmdEndRenderPass(cmd);
-    colorToSampledBarrier(cmd, waterShadowImage_);
-    waterShadowValid_ = true;
+      VkClearValue shadowClear{};
+      shadowClear.color = {{0, 0, 0, 0}};
+      VkRenderPassBeginInfo shadowRp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+      shadowRp.renderPass = blurPass_;
+      shadowRp.framebuffer = waterShadowFB_;
+      shadowRp.renderArea.extent = {kWaterShadowMapSize, kWaterShadowMapSize};
+      shadowRp.clearValueCount = 1;
+      shadowRp.pClearValues = &shadowClear;
+      vkCmdBeginRenderPass(cmd, &shadowRp, VK_SUBPASS_CONTENTS_INLINE);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        thicknessPipeline_);
+      vkCmdSetViewport(cmd, 0, 1, &shadowViewport);
+      vkCmdSetScissor(cmd, 0, 1, &shadowScissor);
+      vkCmdPushConstants(cmd, depthPipelineLayout_,
+                         VK_SHADER_STAGE_VERTEX_BIT |
+                             VK_SHADER_STAGE_FRAGMENT_BIT,
+                         0, sizeof(DepthPush), &shadowDp);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              depthPipelineLayout_, 0, 1, &computeSet, 0,
+                              nullptr);
+      VkBuffer shadowVB[] = {quadBuffer_};
+      VkDeviceSize shadowOffsets[] = {0};
+      vkCmdBindVertexBuffers(cmd, 0, 1, shadowVB, shadowOffsets);
+      if (numParticles_ > 0)
+        vkCmdDraw(cmd, 4, numParticles_, 0, 0);
+      vkCmdEndRenderPass(cmd);
+      colorToSampledBarrier(cmd, waterShadowImage_);
+      waterShadowValid_ = true;
       shadowSunAzimuth_ = fluidSettings_.sunAzimuthDegrees;
       shadowSunElevation_ = fluidSettings_.sunElevationDegrees;
-      }
+    }
 
     // Render the environment background first so the water shader can
     // refract against it in screen space.
     VkClearValue sceneClear{};
     sceneClear.color = {{0.02f, 0.03f, 0.06f, 1.0f}};
     VkClearValue sceneDepthClear{};
-    sceneDepthClear.color = {{1.0e4f, 0.0f, 0.0f, 0.0f}};
+    sceneDepthClear.color = {{kNoSurfaceDepth, 0.0f, 0.0f, 0.0f}};
     VkRenderPassBeginInfo srp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     srp.renderPass = scenePass_;
     srp.framebuffer = sceneFB_;
@@ -2476,20 +2516,21 @@ private:
     VkClearValue sceneZClear{};
     sceneZClear.depthStencil = {1.0f, 0};
     std::array<VkClearValue, 3> sceneClears = {sceneClear, sceneDepthClear,
-                                                sceneZClear};
-    srp.clearValueCount = (uint32_t)sceneClears.size();
+                                               sceneZClear};
+    srp.clearValueCount = static_cast<uint32_t>(sceneClears.size());
     srp.pClearValues = sceneClears.data();
     vkCmdBeginRenderPass(cmd, &srp, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, backgroundPipeline_);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      backgroundPipeline_);
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                compositePipelineLayout_, 0, 1, &compositeSet, 0,
-                nullptr);
+                            compositePipelineLayout_, 0, 1, &compositeSet, 0,
+                            nullptr);
     vkCmdPushConstants(cmd, compositePipelineLayout_,
-               VK_SHADER_STAGE_VERTEX_BIT |
-                 VK_SHADER_STAGE_FRAGMENT_BIT,
-               0, sizeof(WaterPush), &wp);
+                       VK_SHADER_STAGE_VERTEX_BIT |
+                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(WaterPush), &wp);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 
     // Opaque geometry writes both regular depth (for visibility) and linear
@@ -2498,12 +2539,14 @@ private:
     scenePush.view = dp.view;
     scenePush.proj = dp.proj;
     if (sceneMeshVertexCount_ > 0) {
-      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneMeshPipeline_);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        sceneMeshPipeline_);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              sceneMeshPipelineLayout_, 0, 1, &compositeSet,
-                              0, nullptr);
-      vkCmdPushConstants(cmd, sceneMeshPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                         0, sizeof(ScenePush), &scenePush);
+                              sceneMeshPipelineLayout_, 0, 1, &compositeSet, 0,
+                              nullptr);
+      vkCmdPushConstants(cmd, sceneMeshPipelineLayout_,
+                         VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ScenePush),
+                         &scenePush);
       VkBuffer sceneVB[] = {sceneMeshBuffer_};
       VkDeviceSize sceneOffsets[] = {0};
       vkCmdBindVertexBuffers(cmd, 0, 1, sceneVB, sceneOffsets);
@@ -2529,7 +2572,8 @@ private:
     vkCmdSetViewport(cmd, 0, 1, &fluidViewport);
     vkCmdSetScissor(cmd, 0, 1, &fluidScissor);
     vkCmdPushConstants(cmd, depthPipelineLayout_,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       VK_SHADER_STAGE_VERTEX_BIT |
+                           VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(DepthPush), &dp);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             depthPipelineLayout_, 0, 1, &computeSet, 0,
@@ -2547,14 +2591,15 @@ private:
 
     // Render spheres to depth target
     std::array<VkClearValue, 2> depthClears{};
-    depthClears[0].color = {{1.0e4f, 0.0f, 0.0f, 0.0f}}; // "empty" depth
+    depthClears[0].color =
+        {{kNoSurfaceDepth, 0.0f, 0.0f, 0.0f}};
     depthClears[1].depthStencil = {1.0f, 0};
     VkRenderPassBeginInfo drp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     drp.renderPass = fluidDepthPass_;
     drp.framebuffer = fluidDepthFB_;
     drp.renderArea.offset = {0, 0};
     drp.renderArea.extent = fluidExtent_;
-    drp.clearValueCount = (uint32_t)depthClears.size();
+    drp.clearValueCount = static_cast<uint32_t>(depthClears.size());
     drp.pClearValues = depthClears.data();
     vkCmdBeginRenderPass(cmd, &drp, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, depthPipeline_);
@@ -2601,11 +2646,11 @@ private:
       vkCmdDraw(cmd, 3, 1, 0, 0);
       vkCmdEndRenderPass(cmd);
     };
-    float invW = 1.0f / (float)fluidExtent_.width;
-    float invH = 1.0f / (float)fluidExtent_.height;
+    const float invW = 1.0f / static_cast<float>(fluidExtent_.width);
+    const float invH = 1.0f / static_cast<float>(fluidExtent_.height);
     for (int i = 0; i < fluidSettings_.blurIterations; ++i) {
-      blurPass(blurTempFB_, i == 0 ? blurSetH_ : blurSetSmooth_, invW,
-               0.0f, i == 0); // horizontal
+      blurPass(blurTempFB_, i == 0 ? blurSetH_ : blurSetSmooth_, invW, 0.0f,
+               i == 0); // horizontal
       colorToSampledBarrier(cmd, blurTempImage_);
       blurPass(blurSmoothFB_, blurSetV_, 0.0f, invH,
                i == 0); // vertical
@@ -2624,9 +2669,9 @@ private:
                         thicknessBlurPipeline_);
       vkCmdSetViewport(cmd, 0, 1, &fluidViewport);
       vkCmdSetScissor(cmd, 0, 1, &fluidScissor);
-      float thicknessBlurPC[5] = {dx, dy, 0.0f,
-                                  fluidSettings_.maxBlurRadius * activeRenderScale_,
-                                  fluidSettings_.blurStrength};
+      float thicknessBlurPC[5] = {
+          dx, dy, 0.0f, fluidSettings_.maxBlurRadius * activeRenderScale_,
+          fluidSettings_.blurStrength};
       vkCmdPushConstants(cmd, blurPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
                          0, sizeof(thicknessBlurPC), thicknessBlurPC);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2648,7 +2693,7 @@ private:
     rp.framebuffer = framebuffers_[imageIndex];
     rp.renderArea.offset = {0, 0};
     rp.renderArea.extent = swapchainExtent_;
-    rp.clearValueCount = (uint32_t)clears.size();
+    rp.clearValueCount = static_cast<uint32_t>(clears.size());
     rp.pClearValues = clears.data();
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compositePipeline_);
@@ -2658,9 +2703,9 @@ private:
                             compositePipelineLayout_, 0, 1, &compositeSet, 0,
                             nullptr);
     vkCmdPushConstants(cmd, compositePipelineLayout_,
-               VK_SHADER_STAGE_VERTEX_BIT |
-                 VK_SHADER_STAGE_FRAGMENT_BIT,
-               0, sizeof(WaterPush), &wp);
+                       VK_SHADER_STAGE_VERTEX_BIT |
+                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(WaterPush), &wp);
     vkCmdDraw(cmd, 3, 1, 0, 0); // fullscreen triangle
     if (imguiInitialized_)
       ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
@@ -2676,8 +2721,7 @@ private:
     framebuffer = VK_NULL_HANDLE;
   }
 
-  void destroyImage(VkImage &image, VkDeviceMemory &memory,
-                    VkImageView &view) {
+  void destroyImage(VkImage &image, VkDeviceMemory &memory, VkImageView &view) {
     if (view)
       vkDestroyImageView(device_, view, nullptr);
     if (image)
@@ -2702,8 +2746,7 @@ private:
     destroyImage(waterShadowDepthImage_, waterShadowDepthMem_,
                  waterShadowDepthView_);
     destroyImage(waterShadowImage_, waterShadowMem_, waterShadowView_);
-    destroyImage(fluidThicknessImage_, fluidThicknessMem_,
-                 fluidThicknessView_);
+    destroyImage(fluidThicknessImage_, fluidThicknessMem_, fluidThicknessView_);
     destroyImage(fluidDepthImage_, fluidDepthMem_, fluidDepthView_);
     destroyImage(fluidZImage_, fluidZMem_, fluidZView_);
     destroyImage(blurTempImage_, blurTempMem_, blurTempView_);
@@ -2756,7 +2799,8 @@ private:
     createFluidTargets();
     updateFluidDescriptors();
     if (imguiInitialized_)
-      ImGui_ImplVulkan_SetMinImageCount((uint32_t)swapchainImages_.size());
+      ImGui_ImplVulkan_SetMinImageCount(
+          static_cast<uint32_t>(swapchainImages_.size()));
     // swapchain image count may have changed; rebuild the per-image semaphores
     VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     renderFinishedSemaphores_.resize(swapchainImages_.size());

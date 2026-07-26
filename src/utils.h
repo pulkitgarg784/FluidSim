@@ -35,7 +35,8 @@ public:
   static float4x4 lookAt(const float3 &eye, const float3 &center,
                          const float3 &up) {
     const float3 forward = linalg::normalize(center - eye);
-    const float3 right = linalg::normalize(linalg::cross(forward, linalg::normalize(up)));
+    const float3 right =
+        linalg::normalize(linalg::cross(forward, linalg::normalize(up)));
     const float3 cameraUp = linalg::cross(right, forward);
     float4x4 matrix = linalg::identity;
     matrix[0] = float4(right.x, cameraUp.x, -forward.x, 0.0f);
@@ -51,8 +52,7 @@ public:
                                   const float3 &viewDir, const float3 &right) {
     const float ndcX = (2.0f * float(mouseX) / float(width)) - 1.0f;
     const float ndcY = 1.0f - (2.0f * float(mouseY) / float(height));
-    const float tanHalfFov =
-        std::tan(fovyDeg * kDegreesToRadians * 0.5f);
+    const float tanHalfFov = std::tan(fovyDeg * kDegreesToRadians * 0.5f);
     const float3 direction =
         viewDir + right * (ndcX * tanHalfFov * aspect) +
         linalg::cross(right, viewDir) * (ndcY * tanHalfFov);

@@ -14,17 +14,17 @@ layout(push_constant) uniform PC {
 
 layout(location = 0) out float outDepth;
 
-const float EMPTY = 1.0e4;
+const float NO_SURFACE_DEPTH = 1.0e4;
 const float TAN_HALF_FOV = 0.41421356237;
 
 void main() {
     float centerD = texture(src, vUV).r;
-    if (centerD >= EMPTY * 0.5 && pc.fillSilhouette > 0.5) {
+    if (centerD >= NO_SURFACE_DEPTH * 0.5 && pc.fillSilhouette > 0.5) {
         for (int distance = 1; distance <= 2; ++distance) {
             float negativeD = texture(src, vUV - pc.dir * float(distance)).r;
             float positiveD = texture(src, vUV + pc.dir * float(distance)).r;
-            bool negativeValid = negativeD < EMPTY * 0.5;
-            bool positiveValid = positiveD < EMPTY * 0.5;
+            bool negativeValid = negativeD < NO_SURFACE_DEPTH * 0.5;
+            bool positiveValid = positiveD < NO_SURFACE_DEPTH * 0.5;
             if (negativeValid || positiveValid) {
                 centerD = negativeValid && positiveValid
                               ? min(negativeD, positiveD)
@@ -33,8 +33,8 @@ void main() {
             }
         }
     }
-    if (centerD >= EMPTY * 0.5) {
-        outDepth = EMPTY;
+    if (centerD >= NO_SURFACE_DEPTH * 0.5) {
+        outDepth = NO_SURFACE_DEPTH;
         return;
     }
 
@@ -50,7 +50,7 @@ void main() {
     for (int i = -R; i <= R; i++) {
         vec2 uv = vUV + pc.dir * float(i);
         float d = texture(src, uv).r;
-        if (d >= EMPTY * 0.5)
+        if (d >= NO_SURFACE_DEPTH * 0.5)
             continue; // no water
         float wSpatial = exp(-float(i * i) / twoSigma2);
         float dd = d - centerD;

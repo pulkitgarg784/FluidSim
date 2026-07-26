@@ -18,7 +18,7 @@ layout(push_constant) uniform PC {
 
 layout(location = 0) out vec4 outColor;
 
-const float EMPTY = 1.0e4;
+const float NO_SURFACE_DEPTH = 1.0e4;
 const float TAN_HALF_FOV = 0.41421356237;
 const float PI = 3.14159265358979323846;
 
@@ -51,8 +51,8 @@ vec3 toWorld(vec3 v) {
 vec3 axisDeriv(vec2 uv, float d, vec3 P, vec2 step) {
     float dp = texture(fluidDepth, uv + step).r;
     float dn = texture(fluidDepth, uv - step).r;
-    bool vp = dp < EMPTY * 0.5;
-    bool vn = dn < EMPTY * 0.5;
+    bool vp = dp < NO_SURFACE_DEPTH * 0.5;
+    bool vn = dn < NO_SURFACE_DEPTH * 0.5;
 
     if (vp && !vn)
         return viewPos(uv + step, dp) - P;
@@ -68,14 +68,14 @@ vec3 axisDeriv(vec2 uv, float d, vec3 P, vec2 step) {
 
 void main() {
     float d = texture(fluidDepth, vUV).r;
-    if (d >= EMPTY * 0.5) {
+    if (d >= NO_SURFACE_DEPTH * 0.5) {
         outColor = texture(sceneColor, vUV);
         return;
     }
 
     // scene depth
     float sceneD = texture(sceneDepth, vUV).r;
-    bool hasSceneSurface = sceneD < EMPTY * 0.5;
+    bool hasSceneSurface = sceneD < NO_SURFACE_DEPTH * 0.5;
     if (hasSceneSurface && sceneD <= d) {
         outColor = texture(sceneColor, vUV);
         return;
@@ -103,7 +103,7 @@ void main() {
 
     // avoid refracting across a foreground object
     float refrSceneD = texture(sceneDepth, refrUV).r;
-    bool refractsIntoScene = refrSceneD < EMPTY * 0.5;
+    bool refractsIntoScene = refrSceneD < NO_SURFACE_DEPTH * 0.5;
     if (refractsIntoScene && refrSceneD <= d)
         refrUV = vUV;
     vec3 refraction = texture(sceneColor, refrUV).rgb;
