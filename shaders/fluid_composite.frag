@@ -6,6 +6,7 @@ layout(binding = 1) uniform sampler2D sceneColor;
 layout(binding = 2) uniform sampler2D environmentMap;
 layout(binding = 3) uniform sampler2D sceneDepth;
 layout(binding = 4) uniform sampler2D fluidThickness;
+layout(binding = 8) uniform sampler2D whitewaterDepth;
 
 layout(push_constant) uniform PC {
     vec4 camRight;
@@ -67,17 +68,45 @@ vec3 axisDeriv(vec2 uv, float d, vec3 P, vec2 step) {
 }
 
 void main() {
-    float d = texture(fluidDepth, vUV).r;
-    if (d >= NO_SURFACE_DEPTH * 0.5) {
-        outColor = texture(sceneColor, vUV);
+    int debugMode = int(floor(pc.material.w + 0.5));
+    if (debugMode == 2 || debugMode == 3) {
+        outColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
-    // scene depth
+    float d = texture(fluidDepth, vUV).r;
+    vec3 sceneCol = texture(sceneColor, vUV).rgb;
     float sceneD = texture(sceneDepth, vUV).r;
     bool hasSceneSurface = sceneD < NO_SURFACE_DEPTH * 0.5;
+    float whitewaterSample = texture(whitewaterDepth, vUV).r;
+
+    // -1 spray, -2 foam, -3 bubbles, -100 background.
+    if (whitewaterSample < 0.0) {
+        int particleType = int(floor(-whitewaterSample + 0.5)) - 1;
+        vec3 debugColor = particleType == 0
+                              ? vec3(1.0, 0.0, 0.0)
+                              : (particleType == 1
+                                     ? vec3(0.0, 1.0, 0.0)
+                                     : (particleType == 2
+                                            ? vec3(0.0, 0.0, 1.0)
+                                            : vec3(0.0)));
+        outColor = vec4(debugColor, 1.0);
+        return;
+    }
+
+    float foamDepth = whitewaterSample;
+    bool hasWhitewater = foamDepth < NO_SURFACE_DEPTH * 0.5;
+    if (hasWhitewater && hasSceneSurface && sceneD <= foamDepth)
+        hasWhitewater = false;
+    float whitewater = hasWhitewater ? 1.0 : 0.0;
+
+    if (d >= NO_SURFACE_DEPTH * 0.5) {
+        outColor = vec4(mix(sceneCol, vec3(1.0), whitewater), 1.0);
+        return;
+    }
+
     if (hasSceneSurface && sceneD <= d) {
-        outColor = texture(sceneColor, vUV);
+        outColor = vec4(mix(sceneCol, vec3(1.0), whitewater), 1.0);
         return;
     }
 
@@ -107,6 +136,9 @@ void main() {
     if (refractsIntoScene && refrSceneD <= d)
         refrUV = vUV;
     vec3 refraction = texture(sceneColor, refrUV).rgb;
+    refraction = mix(refraction, vec3(1.0), whitewater);
+    if (hasWhitewater && foamDepth < d)
+        reflection = vec3(1.0);
 
     float fresnel = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 5.0);
     float F0 = pc.material.z;

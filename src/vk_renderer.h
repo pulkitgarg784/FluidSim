@@ -41,6 +41,11 @@ void stbi_image_free(void *retval_from_stbi_load);
 
 namespace vkr {
 
+static_assert(sizeof(float) == 4 && sizeof(uint32_t) == 4 &&
+                  sizeof(float2) == 8 && sizeof(float4) == 16 &&
+                  sizeof(float4x4) == 64,
+              "GPU scalar, vector, and matrix types must be tightly packed");
+
 // SPH parameter block
 struct SphParams {
   float gravity[4];    // xyz = gravity, w = near-pressure multiplier
@@ -59,15 +64,92 @@ struct SphParams {
   float epsilon;
   uint32_t grid[4]; // xyz = exact grid dimensions, w = total cells
 };
-static_assert(sizeof(SphParams) == 96,
+static_assert(sizeof(SphParams) == 96 &&
+                  offsetof(SphParams, gravity) == 0 &&
+                  offsetof(SphParams, boundsSize) == 16 &&
+                  offsetof(SphParams, deltaT) == 32 &&
+                  offsetof(SphParams, smoothingRadius) == 36 &&
+                  offsetof(SphParams, particleMass) == 40 &&
+                  offsetof(SphParams, targetDensity) == 44 &&
+                  offsetof(SphParams, pressureMultiplier) == 48 &&
+                  offsetof(SphParams, viscosityStrength) == 52 &&
+                  offsetof(SphParams, collisionDamping) == 56 &&
+                  offsetof(SphParams, densityKernelScale) == 60 &&
+                  offsetof(SphParams, pressureGradientKernelScale) == 64 &&
+                  offsetof(SphParams, viscosityKernelScale) == 68 &&
+                  offsetof(SphParams, numParticles) == 72 &&
+                  offsetof(SphParams, epsilon) == 76 &&
+                  offsetof(SphParams, grid) == 80,
               "SphParams must match the std140 shader block");
 
 struct InteractionParams {
   float point[4];
   float radius;
   float strength; // > 0 attract, < 0 repel
-  float _pad0, _pad1;
 };
+static_assert(sizeof(InteractionParams) == 24 &&
+                  offsetof(InteractionParams, point) == 0 &&
+                  offsetof(InteractionParams, radius) == 16 &&
+                  offsetof(InteractionParams, strength) == 20,
+              "InteractionParams must match the std140 shader block");
+
+struct alignas(16) WhitewaterParams {
+  float generationRate;
+  float trappedAirMin;
+  float trappedAirMax;
+  float kineticEnergyMin;
+  float kineticEnergyMax;
+  float bubbleBuoyancy;
+  float sprayDrag;
+  float fluidFollow;
+  float lifetimeMin;
+  float lifetimeMax;
+  float bubbleScale;
+  float renderScale;
+  uint32_t capacity;
+  uint32_t sprayMaxNeighbours;
+  uint32_t bubbleMinNeighbours;
+  uint32_t enabled;
+  uint32_t debugClassification;
+};
+static_assert(sizeof(WhitewaterParams) == 80 &&
+                  alignof(WhitewaterParams) == 16 &&
+                  offsetof(WhitewaterParams, generationRate) == 0 &&
+                  offsetof(WhitewaterParams, trappedAirMin) == 4 &&
+                  offsetof(WhitewaterParams, trappedAirMax) == 8 &&
+                  offsetof(WhitewaterParams, kineticEnergyMin) == 12 &&
+                  offsetof(WhitewaterParams, kineticEnergyMax) == 16 &&
+                  offsetof(WhitewaterParams, bubbleBuoyancy) == 20 &&
+                  offsetof(WhitewaterParams, sprayDrag) == 24 &&
+                  offsetof(WhitewaterParams, fluidFollow) == 28 &&
+                  offsetof(WhitewaterParams, lifetimeMin) == 32 &&
+                  offsetof(WhitewaterParams, lifetimeMax) == 36 &&
+                  offsetof(WhitewaterParams, bubbleScale) == 40 &&
+                  offsetof(WhitewaterParams, renderScale) == 44 &&
+                  offsetof(WhitewaterParams, capacity) == 48 &&
+                  offsetof(WhitewaterParams, sprayMaxNeighbours) == 52 &&
+                  offsetof(WhitewaterParams, bubbleMinNeighbours) == 56 &&
+                  offsetof(WhitewaterParams, enabled) == 60 &&
+                  offsetof(WhitewaterParams, debugClassification) == 64,
+              "WhitewaterParams must match the std140 shader block");
+
+struct WhiteParticle {
+  float positionLife[4];
+  float velocityScale[4];
+};
+static_assert(sizeof(WhiteParticle) == 32 &&
+                  offsetof(WhiteParticle, positionLife) == 0 &&
+                  offsetof(WhiteParticle, velocityScale) == 16,
+              "WhiteParticle must match the std430 shader struct");
+
+struct WhitewaterAllocatorHeader {
+  uint32_t spawnCursor;
+  uint32_t activeCount;
+};
+static_assert(sizeof(WhitewaterAllocatorHeader) == 8 &&
+                  offsetof(WhitewaterAllocatorHeader, spawnCursor) == 0 &&
+                  offsetof(WhitewaterAllocatorHeader, activeCount) == 4,
+              "WhitewaterAllocatorHeader must match the std430 shader block");
 
 struct DepthPush {
   float4x4 view;
@@ -76,6 +158,28 @@ struct DepthPush {
   float4 camUp;
   float4 params; // x = particle radius
 };
+static_assert(sizeof(DepthPush) == 176 &&
+                  offsetof(DepthPush, view) == 0 &&
+                  offsetof(DepthPush, proj) == 64 &&
+                  offsetof(DepthPush, camRight) == 128 &&
+                  offsetof(DepthPush, camUp) == 144 &&
+                  offsetof(DepthPush, params) == 160,
+              "DepthPush must match the shader push-constant layout");
+
+struct FluidDebugPush {
+  float4x4 view;
+  float4x4 proj;
+  float4 camRight;
+  float4 camUp;
+  int32_t debugMode;
+};
+static_assert(sizeof(FluidDebugPush) == 164 &&
+                  offsetof(FluidDebugPush, view) == 0 &&
+                  offsetof(FluidDebugPush, proj) == 64 &&
+                  offsetof(FluidDebugPush, camRight) == 128 &&
+                  offsetof(FluidDebugPush, camUp) == 144 &&
+                  offsetof(FluidDebugPush, debugMode) == 160,
+              "FluidDebugPush must match the shader push-constant layout");
 
 struct BlurPush {
   float dir[2];
@@ -85,6 +189,27 @@ struct BlurPush {
   float particleRadius;
   float fillSilhouette;
 };
+static_assert(sizeof(BlurPush) == 28 &&
+                  offsetof(BlurPush, dir) == 0 &&
+                  offsetof(BlurPush, depthDifferenceStrength) == 8 &&
+                  offsetof(BlurPush, maxScreenSpaceRadius) == 12 &&
+                  offsetof(BlurPush, strength) == 16 &&
+                  offsetof(BlurPush, particleRadius) == 20 &&
+                  offsetof(BlurPush, fillSilhouette) == 24,
+              "BlurPush must match the shader push-constant layout");
+
+struct ThicknessBlurPush {
+  float dir[2];
+  float depthDifferenceStrength;
+  float maxScreenSpaceRadius;
+  float strength;
+};
+static_assert(sizeof(ThicknessBlurPush) == 20 &&
+                  offsetof(ThicknessBlurPush, dir) == 0 &&
+                  offsetof(ThicknessBlurPush, depthDifferenceStrength) == 8 &&
+                  offsetof(ThicknessBlurPush, maxScreenSpaceRadius) == 12 &&
+                  offsetof(ThicknessBlurPush, strength) == 16,
+              "ThicknessBlurPush must match the shader push-constant layout");
 
 struct WaterPush {
   float4 camRight;
@@ -95,11 +220,22 @@ struct WaterPush {
   // RGB Beer-Lambert extinction coefficients.
   float4 extinction;
 };
+static_assert(sizeof(WaterPush) == 80 &&
+                  offsetof(WaterPush, camRight) == 0 &&
+                  offsetof(WaterPush, camUp) == 16 &&
+                  offsetof(WaterPush, camForward) == 32 &&
+                  offsetof(WaterPush, material) == 48 &&
+                  offsetof(WaterPush, extinction) == 64,
+              "WaterPush must match the shader push-constant layout");
 
 struct ScenePush {
   float4x4 view;
   float4x4 proj;
 };
+static_assert(sizeof(ScenePush) == 128 &&
+                  offsetof(ScenePush, view) == 0 &&
+                  offsetof(ScenePush, proj) == 64,
+              "ScenePush must match the shader push-constant layout");
 
 struct SceneLightingParams {
   float4x4 lightVP;
@@ -109,6 +245,13 @@ struct SceneLightingParams {
   // x = fraction of unshadowed ambient light
   float4 shadowParams;
 };
+static_assert(sizeof(SceneLightingParams) == 176 &&
+                  offsetof(SceneLightingParams, lightVP) == 0 &&
+                  offsetof(SceneLightingParams, lightView) == 64 &&
+                  offsetof(SceneLightingParams, sunDirection) == 128 &&
+                  offsetof(SceneLightingParams, extinction) == 144 &&
+                  offsetof(SceneLightingParams, shadowParams) == 160,
+              "SceneLightingParams must match the std140 shader block");
 
 struct FluidRenderSettings {
   float renderScale = 0.75f;
@@ -128,6 +271,35 @@ struct FluidRenderSettings {
   int shadowUpdateInterval = 2;
   int simulationSubsteps = 1;
   float simulationRate = 10.0f;
+};
+
+struct WhitewaterSettings {
+  bool enabled = true;
+  float spawnRate = 120.0f;
+  float trappedAirMin = 15.0f;
+  float trappedAirMax = 25.0f;
+  float kineticEnergyMin = 15.0f;
+  float kineticEnergyMax = 30.0f;
+  float lifetimeMin = 5.0f;
+  float lifetimeMax = 15.0f;
+  float bubbleBuoyancy = 1.4f;
+  float sprayDrag = 0.04f;
+  float fluidFollow = 3.0f;
+  float bubbleScale = 0.3f;
+  float renderScale = 0.25f;
+  int sprayMaxNeighbours = 5;
+  int bubbleMinNeighbours = 20;
+};
+
+enum DebugVisualizationMode : int {
+  kDebugNone = 0,
+  kDebugWhitewaterClassification = 1,
+  kDebugFluidVelocity = 2,
+  kDebugFluidPressure = 3,
+};
+
+struct DebugVisualizationSettings {
+  int mode = kDebugNone;
 };
 
 inline void vkCheck(VkResult r, const char *what) {
@@ -157,8 +329,10 @@ public:
   static constexpr float kDegreesToRadians =
       3.14159265358979323846f / 180.0f;
 
-  void init(int width, int height, const char *title, uint32_t numParticles) {
+  void init(int width, int height, const char *title, uint32_t numParticles,
+            uint32_t maxWhitewaterParticles) {
     numParticles_ = numParticles;
+    maxWhitewaterParticles_ = maxWhitewaterParticles;
     initWindow(width, height, title);
     createInstance(title);
     createSurface();
@@ -180,6 +354,7 @@ public:
     createFluidTargets();
     createFluidPipelines();
     createCommandPoolAndBuffers();
+    clearWhitewaterState();
     createSyncObjects();
   }
 
@@ -202,6 +377,7 @@ public:
     std::cout << "Loaded scene mesh " << resolvedPath << " ("
               << sceneMeshVertexCount_ << " vertices)" << std::endl;
   }
+
   bool shouldClose() const { return glfwWindowShouldClose(window_); }
   void pollEvents() const { glfwPollEvents(); }
 
@@ -247,9 +423,24 @@ public:
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
+    vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE,
+                    UINT64_MAX);
+    std::memcpy(&activeWhitewaterParticleCount_,
+                whitewaterCountReadbackBuffers_[currentFrame_].mapped,
+                sizeof(activeWhitewaterParticleCount_));
+    const uint32_t totalParticleCount =
+        numParticles_ + activeWhitewaterParticleCount_;
+
     ImGui::Begin("Fluid controls");
-    ImGui::Text("Particles: %u", numParticles_);
+    ImGui::Text("Particles: %u total (%u fluid + %u whitewater)",
+                totalParticleCount, numParticles_,
+                activeWhitewaterParticleCount_);
     ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+    if (ImGui::Button("Restart simulation"))
+      restartRequested_ = true;
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Restore the fluid to its initial state and clear "
+                        "all whitewater particles.");
     ImGui::SliderInt("Simulation substeps", &fluidSettings_.simulationSubsteps,
                      1, 8);
     ImGui::SliderFloat("Simulation rate", &fluidSettings_.simulationRate, 0.25f,
@@ -279,6 +470,46 @@ public:
         fluidSettings_.simulationSubsteps = 1;
         fluidSettings_.simulationRate = 10.0f;
       }
+    }
+    ImGui::Separator();
+    ImGui::TextUnformatted("Whitewater");
+    ImGui::Checkbox("Enable whitewater", &whitewaterSettings_.enabled);
+    ImGui::Text("Secondary-particle capacity: %u", maxWhitewaterParticles_);
+    ImGui::SliderFloat("Spawn rate", &whitewaterSettings_.spawnRate, 0.0f,
+                       300.0f, "%.1f");
+    ImGui::SliderFloat("Trapped-air minimum",
+                       &whitewaterSettings_.trappedAirMin, 0.0f, 80.0f,
+                       "%.1f");
+    ImGui::SliderFloat("Trapped-air maximum",
+                       &whitewaterSettings_.trappedAirMax,
+                       whitewaterSettings_.trappedAirMin + 0.1f, 160.0f,
+                       "%.1f");
+    ImGui::SliderFloat("Kinetic minimum",
+                       &whitewaterSettings_.kineticEnergyMin, 0.0f, 100.0f,
+                       "%.1f");
+    ImGui::SliderFloat("Kinetic maximum",
+                       &whitewaterSettings_.kineticEnergyMax,
+                       whitewaterSettings_.kineticEnergyMin + 0.1f, 200.0f,
+                       "%.1f");
+    ImGui::SliderFloat("Minimum lifetime",
+                       &whitewaterSettings_.lifetimeMin, 0.25f, 20.0f,
+                       "%.1f s");
+    ImGui::SliderFloat("Maximum lifetime",
+                       &whitewaterSettings_.lifetimeMax,
+                       whitewaterSettings_.lifetimeMin, 30.0f, "%.1f s");
+    ImGui::SliderInt("Spray neighbour maximum",
+                     &whitewaterSettings_.sprayMaxNeighbours, 0, 12);
+    ImGui::SliderInt("Bubble neighbour minimum",
+                     &whitewaterSettings_.bubbleMinNeighbours,
+                     whitewaterSettings_.sprayMaxNeighbours + 1, 32);
+    ImGui::SliderFloat("Bubble buoyancy",
+                       &whitewaterSettings_.bubbleBuoyancy, 1.0f, 3.0f,
+                       "%.2f");
+    ImGui::SliderFloat("Whitewater size", &whitewaterSettings_.renderScale,
+                       0.05f, 0.75f, "%.2fx");
+    if (ImGui::Button("Reset whitewater preset")) {
+      whitewaterSettings_ = WhitewaterSettings{};
+      whitewaterSimulationTime_ = 0.0f;
     }
     ImGui::Separator();
     ImGui::TextUnformatted("Screen-space reconstruction");
@@ -313,6 +544,28 @@ public:
     ImGui::SliderInt("Shadow update interval",
                      &fluidSettings_.shadowUpdateInterval, 1, 4, "%d frames");
     ImGui::TextUnformatted("Click and drag outside this panel to orbit.");
+    ImGui::End();
+
+    ImGui::SetNextWindowPos(ImVec2(390.0f, 20.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(330.0f, 0.0f), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Debug visualization");
+    constexpr const char *debugModes[] = {
+        "Off", "Whitewater", "Particle velocity",
+        "Particle pressure"};
+    ImGui::Combo("View", &debugVisualization_.mode, debugModes,
+                 static_cast<int>(std::size(debugModes)));
+    if (debugVisualization_.mode == kDebugWhitewaterClassification) {
+      ImGui::TextColored(ImVec4(1, 0, 0, 1), "Red: spray");
+      ImGui::TextColored(ImVec4(0, 1, 0, 1), "Green: foam");
+      ImGui::TextColored(ImVec4(0, 0.45f, 1, 1), "Blue: bubbles");
+    } else if (debugVisualization_.mode == kDebugFluidVelocity) {
+      ImGui::TextUnformatted("Blue: still   Cyan/Yellow: medium   Red: fast");
+    } else if (debugVisualization_.mode == kDebugFluidPressure) {
+      ImGui::TextUnformatted(
+          "Blue: negative   White: near zero   Red: positive");
+    } else {
+      ImGui::TextUnformatted("Normal scene rendering.");
+    }
     ImGui::End();
   }
 
@@ -353,6 +606,8 @@ public:
 
     const VkDeviceSize uploadSize =
         static_cast<VkDeviceSize>(numParticles_) * sizeof(float4);
+    initialPositions_ = positions;
+    initialVelocities_ = velocities;
     uploadViaStaging(positionsBuf_, positions.data(), uploadSize);
     uploadViaStaging(velocitiesBuf_, velocities.data(), uploadSize);
   }
@@ -363,6 +618,10 @@ public:
                  const float3 &camForward, float radius, int substeps) {
     vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE,
                     UINT64_MAX);
+    if (restartRequested_) {
+      restartSimulation();
+      restartRequested_ = false;
+    }
     if (std::abs(fluidSettings_.renderScale - activeRenderScale_) > 0.001f) {
       // This only stalls when the user changes the quality control.
       vkDeviceWaitIdle(device_);
@@ -378,6 +637,34 @@ public:
                 sizeof(frameParams));
     std::memcpy(interactionBuffers_[currentFrame_].mapped, &pendingInteraction_,
                 sizeof(InteractionParams));
+    whitewaterSimulationTime_ += frameParams.deltaT *
+                                 static_cast<float>(std::max(substeps, 1));
+    const float fadeT =
+        std::clamp((whitewaterSimulationTime_ - 0.2f) / 0.35f, 0.0f, 1.0f);
+    WhitewaterParams whitewater{};
+    whitewater.generationRate =
+        whitewaterSettings_.spawnRate * fadeT * fadeT;
+    whitewater.trappedAirMin = whitewaterSettings_.trappedAirMin;
+    whitewater.trappedAirMax = whitewaterSettings_.trappedAirMax;
+    whitewater.kineticEnergyMin = whitewaterSettings_.kineticEnergyMin;
+    whitewater.kineticEnergyMax = whitewaterSettings_.kineticEnergyMax;
+    whitewater.bubbleBuoyancy = whitewaterSettings_.bubbleBuoyancy;
+    whitewater.sprayDrag = whitewaterSettings_.sprayDrag;
+    whitewater.fluidFollow = whitewaterSettings_.fluidFollow;
+    whitewater.lifetimeMin = whitewaterSettings_.lifetimeMin;
+    whitewater.lifetimeMax = whitewaterSettings_.lifetimeMax;
+    whitewater.bubbleScale = whitewaterSettings_.bubbleScale;
+    whitewater.renderScale = whitewaterSettings_.renderScale;
+    whitewater.capacity = maxWhitewaterParticles_;
+    whitewater.sprayMaxNeighbours =
+        static_cast<uint32_t>(whitewaterSettings_.sprayMaxNeighbours);
+    whitewater.bubbleMinNeighbours =
+        static_cast<uint32_t>(whitewaterSettings_.bubbleMinNeighbours);
+    whitewater.enabled = whitewaterSettings_.enabled ? 1u : 0u;
+    whitewater.debugClassification =
+        debugVisualization_.mode == kDebugWhitewaterClassification ? 1u : 0u;
+    std::memcpy(whitewaterParamsBuffers_[currentFrame_].mapped, &whitewater,
+                sizeof(whitewater));
 
     uint32_t imageIndex = 0;
     VkResult acquire = vkAcquireNextImageKHR(
@@ -405,9 +692,11 @@ public:
     wp.camRight = float4(camRight, 0.0f);
     wp.camUp = float4(camUp, 0.0f);
     wp.camForward = float4(camForward, 0.0f);
-    wp.material = float4(fluidSettings_.refractionStrength,
-                         fluidSettings_.absorptionScale,
-                         fluidSettings_.baseReflectance, 0.0f);
+    wp.material =
+        float4(fluidSettings_.refractionStrength,
+               fluidSettings_.absorptionScale,
+               fluidSettings_.baseReflectance,
+               static_cast<float>(debugVisualization_.mode));
     wp.extinction =
         float4(fluidSettings_.extinctionRed, fluidSettings_.extinctionGreen,
                fluidSettings_.extinctionBlue, 0.0f);
@@ -494,6 +783,8 @@ public:
       vkDestroyPipeline(device_, thicknessBlurPipeline_, nullptr);
     if (thicknessPipeline_)
       vkDestroyPipeline(device_, thicknessPipeline_, nullptr);
+    if (whitewaterPipeline_)
+      vkDestroyPipeline(device_, whitewaterPipeline_, nullptr);
     if (blurPipelineLayout_)
       vkDestroyPipelineLayout(device_, blurPipelineLayout_, nullptr);
     if (blurPass_)
@@ -504,6 +795,8 @@ public:
       vkDestroyDescriptorSetLayout(device_, compositeSetLayout_, nullptr);
     if (depthPipeline_)
       vkDestroyPipeline(device_, depthPipeline_, nullptr);
+    if (fluidDebugPipeline_)
+      vkDestroyPipeline(device_, fluidDebugPipeline_, nullptr);
     if (depthPipelineLayout_)
       vkDestroyPipelineLayout(device_, depthPipelineLayout_, nullptr);
     if (fluidSampler_)
@@ -533,9 +826,12 @@ public:
     destroyBuffers({&positionsBuf_, &velocitiesBuf_, &predictedBuf_,
                     &densitiesBuf_, &keysBuf_, &indicesBuf_, &startBuf_,
                     &endBuf_, &sortedPosBuf_, &sortedVelBuf_, &sortedPredBuf_,
-                    &sortStorageBuf_, &quadBuffer_, &sceneMeshBuffer_});
+                    &sortStorageBuf_, &whitewaterParticlesBuf_,
+                    &whitewaterAllocatorBuf_, &quadBuffer_, &sceneMeshBuffer_});
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
       destroyBuffers({&paramsBuffers_[i], &interactionBuffers_[i],
+                      &whitewaterParamsBuffers_[i],
+                      &whitewaterCountReadbackBuffers_[i],
                       &sceneLightingBuffers_[i]});
     }
 
@@ -599,6 +895,24 @@ private:
     destroyBuffer(staging);
   }
 
+  void restartSimulation() {
+    if (initialPositions_.empty() || initialVelocities_.empty())
+      throw std::runtime_error("Cannot restart before uploading initial state");
+
+    const VkDeviceSize uploadSize =
+        static_cast<VkDeviceSize>(numParticles_) * sizeof(float4);
+    uploadViaStaging(positionsBuf_, initialPositions_.data(), uploadSize);
+    uploadViaStaging(velocitiesBuf_, initialVelocities_.data(), uploadSize);
+    clearWhitewaterState();
+
+    for (auto &buffer : whitewaterCountReadbackBuffers_)
+      std::memset(buffer.mapped, 0, sizeof(uint32_t));
+    whitewaterSimulationTime_ = 0.0f;
+    activeWhitewaterParticleCount_ = 0;
+    renderedFrameCount_ = 0;
+    waterShadowValid_ = false;
+  }
+
   GLFWwindow *window_ = nullptr;
   bool framebufferResized_ = false;
 
@@ -638,6 +952,12 @@ private:
   VkImage fluidZImage_ = VK_NULL_HANDLE;
   VkDeviceMemory fluidZMem_ = VK_NULL_HANDLE;
   VkImageView fluidZView_ = VK_NULL_HANDLE; // offscreen depth buffer
+  VkImage whitewaterDepthImage_ = VK_NULL_HANDLE;
+  VkDeviceMemory whitewaterDepthMem_ = VK_NULL_HANDLE;
+  VkImageView whitewaterDepthView_ = VK_NULL_HANDLE;
+  VkImage whitewaterZImage_ = VK_NULL_HANDLE;
+  VkDeviceMemory whitewaterZMem_ = VK_NULL_HANDLE;
+  VkImageView whitewaterZView_ = VK_NULL_HANDLE;
   VkImage sceneColorImage_ = VK_NULL_HANDLE;
   VkDeviceMemory sceneColorMem_ = VK_NULL_HANDLE;
   VkImageView sceneColorView_ = VK_NULL_HANDLE;
@@ -651,6 +971,7 @@ private:
   VkFramebuffer sceneFB_ = VK_NULL_HANDLE;
   VkRenderPass fluidDepthPass_ = VK_NULL_HANDLE;
   VkFramebuffer fluidDepthFB_ = VK_NULL_HANDLE;
+  VkFramebuffer whitewaterDepthFB_ = VK_NULL_HANDLE;
   VkSampler fluidSampler_ = VK_NULL_HANDLE;
   VkSampler sceneSampler_ = VK_NULL_HANDLE;
   VkImage environmentImage_ = VK_NULL_HANDLE;
@@ -659,6 +980,7 @@ private:
   VkSampler envSampler_ = VK_NULL_HANDLE;
   VkPipelineLayout depthPipelineLayout_ = VK_NULL_HANDLE;
   VkPipeline depthPipeline_ = VK_NULL_HANDLE;
+  VkPipeline fluidDebugPipeline_ = VK_NULL_HANDLE;
   VkDescriptorSetLayout compositeSetLayout_ = VK_NULL_HANDLE;
   VkDescriptorPool compositePool_ = VK_NULL_HANDLE;
   std::array<VkDescriptorSet, kMaxFramesInFlight> compositeSets_{};
@@ -705,6 +1027,7 @@ private:
   VkPipeline blurPipeline_ = VK_NULL_HANDLE;
   VkPipeline thicknessBlurPipeline_ = VK_NULL_HANDLE;
   VkPipeline thicknessPipeline_ = VK_NULL_HANDLE;
+  VkPipeline whitewaterPipeline_ = VK_NULL_HANDLE;
   VkDescriptorSet blurSetH_ = VK_NULL_HANDLE;
   VkDescriptorSet blurSetV_ = VK_NULL_HANDLE;
   VkDescriptorSet blurSetSmooth_ = VK_NULL_HANDLE;
@@ -716,12 +1039,16 @@ private:
   uint32_t sceneMeshVertexCount_ = 0;
 
   uint32_t numParticles_ = 0;
+  uint32_t maxWhitewaterParticles_ = 0;
   uint32_t gridCellCount_ = 0;
   uint32_t startCapacity_ = 0;
   float baseDeltaT_ = 0.002f;
 
   AllocatedBuffer positionsBuf_;
   AllocatedBuffer velocitiesBuf_;
+  std::vector<float4> initialPositions_;
+  std::vector<float4> initialVelocities_;
+  bool restartRequested_ = false;
   AllocatedBuffer predictedBuf_;
   AllocatedBuffer densitiesBuf_;
   std::array<AllocatedBuffer, kMaxFramesInFlight> paramsBuffers_;
@@ -729,6 +1056,15 @@ private:
   SphParams defaultSphParams_{};
   std::array<AllocatedBuffer, kMaxFramesInFlight> interactionBuffers_;
   InteractionParams pendingInteraction_{};
+  AllocatedBuffer whitewaterParticlesBuf_;
+  AllocatedBuffer whitewaterAllocatorBuf_;
+  std::array<AllocatedBuffer, kMaxFramesInFlight> whitewaterParamsBuffers_;
+  std::array<AllocatedBuffer, kMaxFramesInFlight>
+      whitewaterCountReadbackBuffers_;
+  WhitewaterSettings whitewaterSettings_{};
+  DebugVisualizationSettings debugVisualization_{};
+  float whitewaterSimulationTime_ = 0.0f;
+  uint32_t activeWhitewaterParticleCount_ = 0;
   std::array<AllocatedBuffer, kMaxFramesInFlight> sceneLightingBuffers_;
   // spatial-hash buffers
   AllocatedBuffer keysBuf_;
@@ -751,8 +1087,8 @@ private:
   VkPipelineLayout computePipelineLayout_ = VK_NULL_HANDLE;
 
   // 0:external+keys 1:reorder 2:startReset 3:startIndices 4:density
-  // 5:pressure 6:viscosity + integration + tank
-  std::array<VkPipeline, 7> computePipelines_{};
+  // 5:pressure + diffuse spawn, 6:viscosity + integration, 7:whitewater
+  std::array<VkPipeline, 8> computePipelines_{};
 
   VkCommandPool commandPool_ = VK_NULL_HANDLE;
   std::array<VkCommandBuffer, kMaxFramesInFlight> commandBuffers_{};
@@ -1536,13 +1872,49 @@ private:
     createStorageBuffer(vec4Size, sortedPosBuf_);
     createStorageBuffer(vec4Size, sortedVelBuf_);
     createStorageBuffer(vec4Size, sortedPredBuf_);
+    const VkDeviceSize whitewaterSize =
+        sizeof(WhiteParticle) * maxWhitewaterParticles_;
+    createStorageBuffer(whitewaterSize, whitewaterParticlesBuf_, true);
+    const VkDeviceSize whitewaterAllocatorSize =
+        sizeof(WhitewaterAllocatorHeader) +
+        sizeof(uint32_t) *
+            static_cast<VkDeviceSize>(maxWhitewaterParticles_);
+    createDeviceBuffer(whitewaterAllocatorSize,
+                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                           VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                       whitewaterAllocatorBuf_);
 
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
       createMappedUniformBuffer<SphParams>(paramsBuffers_[i],
                                            "SPH params buffer");
       createMappedUniformBuffer<InteractionParams>(interactionBuffers_[i],
                                                    "interaction params buffer");
+      createMappedUniformBuffer<WhitewaterParams>(
+          whitewaterParamsBuffers_[i], "whitewater params buffer");
+      createHostBuffer(sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                       nullptr, whitewaterCountReadbackBuffers_[i],
+                       "whitewater count readback buffer");
+      vkCheck(vkMapMemory(device_,
+                          whitewaterCountReadbackBuffers_[i].memory, 0,
+                          sizeof(uint32_t), 0,
+                          &whitewaterCountReadbackBuffers_[i].mapped),
+              "map whitewater count readback buffer");
+      std::memset(whitewaterCountReadbackBuffers_[i].mapped, 0,
+                  sizeof(uint32_t));
     }
+  }
+
+  void clearWhitewaterState() {
+    submitOneTimeCommands(
+        commandPool_,
+        [&](VkCommandBuffer commandBuffer) {
+          vkCmdFillBuffer(commandBuffer, whitewaterParticlesBuf_, 0,
+                          VK_WHOLE_SIZE, 0u);
+          vkCmdFillBuffer(commandBuffer, whitewaterAllocatorBuf_, 0,
+                          VK_WHOLE_SIZE, 0u);
+        },
+        "clear whitewater buffers");
   }
 
   void createSceneLightingBuffer() {
@@ -1721,14 +2093,20 @@ private:
     constexpr VkShaderStageFlags compute = VK_SHADER_STAGE_COMPUTE_BIT;
     constexpr VkShaderStageFlags computeAndVertex =
         VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT;
+    constexpr VkShaderStageFlags computeVertexAndFragment =
+        VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT |
+        VK_SHADER_STAGE_FRAGMENT_BIT;
     descriptorSets_ = createDescriptorSets<kMaxFramesInFlight>(
         {storageBinding(0, computeAndVertex),
          storageBinding(1, computeAndVertex), storageBinding(2, compute),
-         storageBinding(3, compute), uniformBinding(5, compute),
+         storageBinding(3, computeAndVertex),
+         uniformBinding(5, computeAndVertex),
          storageBinding(6, compute), storageBinding(7, compute),
-         storageBinding(8, compute), storageBinding(9, compute),
-         storageBinding(10, compute), storageBinding(11, compute),
-         uniformBinding(12, compute), storageBinding(13, compute)},
+         storageBinding(8, compute), storageBinding(9, computeAndVertex),
+         storageBinding(10, computeAndVertex), storageBinding(11, compute),
+         uniformBinding(12, compute), storageBinding(13, compute),
+         uniformBinding(14, computeVertexAndFragment),
+         storageBinding(15, computeAndVertex), storageBinding(16, compute)},
         descriptorSetLayout_, descriptorPool_,
         "create compute descriptor sets");
 
@@ -1748,6 +2126,12 @@ private:
                                  storageDescriptor(11, sortedPredBuf_),
                                  uniformDescriptor(12, interactionBuffers_[i]),
                                  storageDescriptor(13, endBuf_),
+                                 uniformDescriptor(
+                                     14, whitewaterParamsBuffers_[i]),
+                                 storageDescriptor(15,
+                                                   whitewaterParticlesBuf_),
+                                 storageDescriptor(16,
+                                                   whitewaterAllocatorBuf_),
                              });
     }
   }
@@ -1784,6 +2168,8 @@ private:
     computePipelines_[5] = createComputePipeline("sph_pressure.comp.spv");
     computePipelines_[6] =
         createComputePipeline("sph_viscosity_integrate.comp.spv");
+    computePipelines_[7] =
+        createComputePipeline("whitewater_update.comp.spv");
   }
 
   void createImage2D(VkFormat format, VkImageUsageFlags usage,
@@ -1941,6 +2327,19 @@ private:
     createFramebuffer(fluidDepthPass_, {fluidDepthView_, fluidZView_},
                       fluidExtent_, fluidDepthFB_,
                       "create fluid depth framebuffer");
+    createImage2D(
+        fluidDepthFormat_,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT, whitewaterDepthImage_, whitewaterDepthMem_,
+        whitewaterDepthView_, swapchainExtent_.width, swapchainExtent_.height);
+    createImage2D(depthFormat_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                  VK_IMAGE_ASPECT_DEPTH_BIT, whitewaterZImage_,
+                  whitewaterZMem_, whitewaterZView_, swapchainExtent_.width,
+                  swapchainExtent_.height);
+    createFramebuffer(
+        fluidDepthPass_, {whitewaterDepthView_, whitewaterZView_},
+        swapchainExtent_, whitewaterDepthFB_,
+        "create whitewater depth framebuffer");
 
     if (!fluidSampler_) {
       VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -2055,13 +2454,19 @@ private:
         "fluid_depth.vert.spv", "fluid_depth.frag.spv", fluidDepthPass_,
         depthPipelineLayout_, &bind, &attr, /*attrCount*/ 1, /*depthTest*/ true,
         1, false, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
+    fluidDebugPipeline_ = buildGraphicsPipeline(
+        "fluid_debug.vert.spv", "fluid_debug.frag.spv", renderPass_,
+        depthPipelineLayout_, &bind, &attr, /*attrCount*/ 1,
+        /*depthTest*/ true, 1, /*additiveBlend*/ false,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
 
     constexpr VkShaderStageFlags fragment = VK_SHADER_STAGE_FRAGMENT_BIT;
     const auto sets = createDescriptorSets<kMaxFramesInFlight + 5>(
         {samplerBinding(0, fragment), samplerBinding(1, fragment),
          samplerBinding(2, fragment), samplerBinding(3, fragment),
          samplerBinding(4, fragment), samplerBinding(5, fragment),
-         uniformBinding(6, fragment), samplerBinding(7, fragment)},
+         uniformBinding(6, fragment), samplerBinding(7, fragment),
+         samplerBinding(8, fragment)},
         compositeSetLayout_, compositePool_, "create fluid descriptor sets");
     for (int i = 0; i < kMaxFramesInFlight; ++i)
       compositeSets_[i] = sets[i];
@@ -2088,6 +2493,11 @@ private:
         "fluid_depth.vert.spv", "fluid_thickness.frag.spv", blurPass_,
         depthPipelineLayout_, &bind, &attr, /*attrCount*/ 1,
         /*depthTest*/ false, 1, /*additiveBlend*/ true,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
+    whitewaterPipeline_ = buildGraphicsPipeline(
+        "whitewater.vert.spv", "whitewater.frag.spv", fluidDepthPass_,
+        depthPipelineLayout_, &bind, &attr, /*attrCount*/ 1,
+        /*depthTest*/ true, 1, /*additiveBlend*/ false,
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
 
     backgroundPipeline_ = buildGraphicsPipeline(
@@ -2138,6 +2548,7 @@ private:
           {compositeSets_[i], 4, blurTempView_, fluidSampler_},
           {compositeSets_[i], 5, waterShadowView_, sceneSampler_},
           {compositeSets_[i], 7, waterShadowDepthView_, sceneSampler_},
+          {compositeSets_[i], 8, whitewaterDepthView_, fluidSampler_},
       });
     }
   }
@@ -2343,6 +2754,8 @@ private:
 
     const uint32_t groupsN = dispatchGroupCount(numParticles_);
     const uint32_t groupsGrid = dispatchGroupCount(gridCellCount_);
+    const uint32_t groupsWhitewater =
+        dispatchGroupCount(maxWhitewaterParticles_);
     VkDescriptorSet computeSet = descriptorSets_[currentFrame_];
     VkDescriptorSet compositeSet = compositeSets_[currentFrame_];
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -2359,10 +2772,45 @@ private:
       dispatchStage(cmd, computePipelines_[2], groupsGrid); // reset exact grid
       dispatchStage(cmd, computePipelines_[3], groupsN);    // bucket starts
       dispatchStage(cmd, computePipelines_[4], groupsN);    // density
-      dispatchStage(cmd, computePipelines_[5], groupsN);    // pressure
-      dispatchStage(cmd, computePipelines_[6], groupsN,
-                    s + 1 < substeps); // viscosity + integrate + collision
+      dispatchStage(cmd, computePipelines_[5],
+                    groupsN); // pressure + diffuse spawn
+      dispatchStage(cmd, computePipelines_[6],
+                    groupsN); // viscosity + integrate + collision
+      dispatchStage(cmd, computePipelines_[7], groupsWhitewater,
+                    s + 1 < substeps); // classify and advect whitewater
     }
+
+    VkBufferMemoryBarrier countToTransfer{
+        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    countToTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    countToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    countToTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    countToTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    countToTransfer.buffer = whitewaterAllocatorBuf_;
+    countToTransfer.offset =
+        offsetof(WhitewaterAllocatorHeader, activeCount);
+    countToTransfer.size = sizeof(uint32_t);
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1,
+                         &countToTransfer, 0, nullptr);
+    VkBufferCopy countCopy{
+        offsetof(WhitewaterAllocatorHeader, activeCount), 0,
+        sizeof(uint32_t)};
+    vkCmdCopyBuffer(cmd, whitewaterAllocatorBuf_,
+                    whitewaterCountReadbackBuffers_[currentFrame_], 1,
+                    &countCopy);
+    VkBufferMemoryBarrier countToHost{
+        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    countToHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    countToHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    countToHost.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    countToHost.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    countToHost.buffer = whitewaterCountReadbackBuffers_[currentFrame_];
+    countToHost.offset = 0;
+    countToHost.size = sizeof(uint32_t);
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1,
+                         &countToHost, 0, nullptr);
 
     VkMemoryBarrier toVertex{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     toVertex.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -2385,6 +2833,42 @@ private:
                              0.0f,
                              1.0f};
     VkRect2D fluidScissor{{0, 0}, fluidExtent_};
+
+    // Whitewater is rendered into a separate nearest depth mask
+    std::array<VkClearValue, 2> whitewaterClears{};
+    whitewaterClears[0].color = {{
+        debugVisualization_.mode == kDebugWhitewaterClassification
+            ? -100.0f
+            : kNoSurfaceDepth,
+        0, 0, 0}};
+    whitewaterClears[1].depthStencil = {1.0f, 0};
+    VkRenderPassBeginInfo whitewaterRp{
+        VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    whitewaterRp.renderPass = fluidDepthPass_;
+    whitewaterRp.framebuffer = whitewaterDepthFB_;
+    whitewaterRp.renderArea.extent = swapchainExtent_;
+    whitewaterRp.clearValueCount =
+        static_cast<uint32_t>(whitewaterClears.size());
+    whitewaterRp.pClearValues = whitewaterClears.data();
+    vkCmdBeginRenderPass(cmd, &whitewaterRp, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      whitewaterPipeline_);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdPushConstants(cmd, depthPipelineLayout_,
+                       VK_SHADER_STAGE_VERTEX_BIT |
+                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(DepthPush), &dp);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            depthPipelineLayout_, 0, 1, &computeSet, 0,
+                            nullptr);
+    VkBuffer whitewaterVB[] = {quadBuffer_};
+    VkDeviceSize whitewaterOffsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, whitewaterVB, whitewaterOffsets);
+    if (maxWhitewaterParticles_ > 0)
+      vkCmdDraw(cmd, 4, maxWhitewaterParticles_, 0, 0);
+    vkCmdEndRenderPass(cmd);
+    colorToSampledBarrier(cmd, whitewaterDepthImage_);
 
     // Render water thickness from the lights view.
     const float azimuth =
@@ -2669,11 +3153,12 @@ private:
                         thicknessBlurPipeline_);
       vkCmdSetViewport(cmd, 0, 1, &fluidViewport);
       vkCmdSetScissor(cmd, 0, 1, &fluidScissor);
-      float thicknessBlurPC[5] = {
-          dx, dy, 0.0f, fluidSettings_.maxBlurRadius * activeRenderScale_,
+      ThicknessBlurPush thicknessBlurPC{
+          {dx, dy}, 0.0f,
+          fluidSettings_.maxBlurRadius * activeRenderScale_,
           fluidSettings_.blurStrength};
       vkCmdPushConstants(cmd, blurPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
-                         0, sizeof(thicknessBlurPC), thicknessBlurPC);
+                         0, sizeof(thicknessBlurPC), &thicknessBlurPC);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                               blurPipelineLayout_, 0, 1, &src, 0, nullptr);
       vkCmdDraw(cmd, 3, 1, 0, 0);
@@ -2707,6 +3192,28 @@ private:
                            VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(WaterPush), &wp);
     vkCmdDraw(cmd, 3, 1, 0, 0); // fullscreen triangle
+    if (debugVisualization_.mode == kDebugFluidVelocity ||
+        debugVisualization_.mode == kDebugFluidPressure) {
+      FluidDebugPush debugPush{};
+      debugPush.view = dp.view;
+      debugPush.proj = dp.proj;
+      debugPush.camRight = dp.camRight;
+      debugPush.camUp = dp.camUp;
+      debugPush.debugMode = debugVisualization_.mode;
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        fluidDebugPipeline_);
+      vkCmdPushConstants(cmd, depthPipelineLayout_,
+                         VK_SHADER_STAGE_VERTEX_BIT |
+                             VK_SHADER_STAGE_FRAGMENT_BIT,
+                         0, sizeof(FluidDebugPush), &debugPush);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              depthPipelineLayout_, 0, 1, &computeSet, 0,
+                              nullptr);
+      VkBuffer debugVB[] = {quadBuffer_};
+      VkDeviceSize debugOffsets[] = {0};
+      vkCmdBindVertexBuffers(cmd, 0, 1, debugVB, debugOffsets);
+      vkCmdDraw(cmd, 4, numParticles_, 0, 0);
+    }
     if (imguiInitialized_)
       ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
     vkCmdEndRenderPass(cmd);
@@ -2734,6 +3241,7 @@ private:
   }
 
   void destroyFluidSizedTargets() {
+    destroyFramebuffer(whitewaterDepthFB_);
     destroyFramebuffer(waterShadowDepthFB_);
     destroyFramebuffer(waterShadowFB_);
     destroyFramebuffer(fluidThicknessFB_);
@@ -2747,6 +3255,9 @@ private:
                  waterShadowDepthView_);
     destroyImage(waterShadowImage_, waterShadowMem_, waterShadowView_);
     destroyImage(fluidThicknessImage_, fluidThicknessMem_, fluidThicknessView_);
+    destroyImage(whitewaterDepthImage_, whitewaterDepthMem_,
+                 whitewaterDepthView_);
+    destroyImage(whitewaterZImage_, whitewaterZMem_, whitewaterZView_);
     destroyImage(fluidDepthImage_, fluidDepthMem_, fluidDepthView_);
     destroyImage(fluidZImage_, fluidZMem_, fluidZView_);
     destroyImage(blurTempImage_, blurTempMem_, blurTempView_);

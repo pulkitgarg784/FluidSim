@@ -14,10 +14,10 @@ constexpr float PI = 3.14159265358979f;
 
 // integration
 constexpr uint32_t referenceParticleCount = 75000u;
-constexpr uint32_t defaultFluidParticleCount = 300000u;
-constexpr uint32_t maxWhitewaterParticleCount = 100000u;
-constexpr uint32_t maxParticles =
-    defaultFluidParticleCount + maxWhitewaterParticleCount;
+constexpr uint32_t defaultFluidParticleCount = 250000u;
+constexpr uint32_t maxFluidParticleCount = 400000u;
+constexpr uint32_t maxWhitewaterParticleCount = 150000u;
+constexpr uint32_t maxParticles = maxFluidParticleCount;
 constexpr uint32_t numParticles = defaultFluidParticleCount;
 constexpr float particleScale = 0.625f;
 constexpr float deltaT = 0.002f * particleScale;

@@ -232,7 +232,8 @@ int main(int argc, char **argv) {
 
   vkr::VulkanRenderer renderer;
   try {
-    renderer.init(width, height, "CS488 Final Project", particleCount);
+    renderer.init(width, height, "CS488 Final Project", particleCount,
+                  sph::maxWhitewaterParticleCount);
     if (!scenePath.empty())
       renderer.loadSceneMesh(scenePath, sceneScale);
   } catch (const std::exception &e) {

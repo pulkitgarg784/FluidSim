@@ -42,6 +42,8 @@ file(MAKE_DIRECTORY ${SHADER_OUT_DIR})
 set(SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_depth.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_depth.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_debug.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_debug.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_thickness.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fullscreen.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene_background.frag
@@ -56,7 +58,10 @@ set(SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_start_indices.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_density.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_pressure.comp
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_viscosity_integrate.comp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_viscosity_integrate.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/whitewater_update.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/whitewater.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/whitewater.frag)
 
 set(SPIRV_OUTPUTS)
 foreach(SHADER ${SHADER_SOURCES})
@@ -88,3 +93,10 @@ target_compile_definitions(CS488 PRIVATE
     ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 target_link_libraries(CS488 PRIVATE Vulkan::Vulkan imgui)
+
+if(APPLE)
+    get_filename_component(VULKAN_LIBRARY_DIR "${Vulkan_LIBRARY}" DIRECTORY)
+    set_target_properties(CS488 PROPERTIES
+        BUILD_RPATH "${VULKAN_LIBRARY_DIR}"
+        INSTALL_RPATH "${VULKAN_LIBRARY_DIR}")
+endif()

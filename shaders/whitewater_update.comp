@@ -1,0 +1,236 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std140, binding = 5) uniform Params {
+  vec4 gravity;
+  vec4 boundsSize;
+  float deltaT;
+  float smoothingRadius;
+  float particleMass;
+  float targetDensity;
+  float pressureMultiplier;
+  float viscosityStrength;
+  float collisionDamping;
+  float densityKernelScale;
+  float pressureGradientKernelScale;
+  float viscosityKernelScale;
+  uint numParticles;
+  float epsilon;
+  uvec4 grid;
+} P;
+layout(std430, binding = 8) readonly buffer StartIndices {
+  uint startIndices[];
+};
+layout(std430, binding = 10) readonly buffer SortedVel {
+  vec4 sortedVel[];
+};
+layout(std430, binding = 11) readonly buffer SortedPred {
+  vec4 sortedPred[];
+};
+layout(std430, binding = 13) readonly buffer EndIndices {
+  uint endIndices[];
+};
+layout(std140, binding = 14) uniform WhitewaterParams {
+  float generationRate;
+  float trappedAirMin;
+  float trappedAirMax;
+  float kineticEnergyMin;
+  float kineticEnergyMax;
+  float bubbleBuoyancy;
+  float sprayDrag;
+  float fluidFollow;
+  float lifetimeMin;
+  float lifetimeMax;
+  float bubbleScale;
+  float renderScale;
+  uint capacity;
+  uint sprayMaxNeighbours;
+  uint bubbleMinNeighbours;
+  uint enabled;
+  uint debugClassification;
+} W;
+struct WhiteParticle {
+  vec4 positionLife;
+  vec4 velocityScale;
+};
+layout(std430, binding = 15) buffer WhiteParticles {
+  WhiteParticle whiteParticles[];
+};
+layout(std430, binding = 16) buffer WhitewaterAllocator {
+  uint whitewaterSpawnCursor;
+  uint whitewaterActiveCount;
+  uint whitewaterSlotStates[];
+};
+
+ivec3 gridCell(vec3 p) {
+  ivec3 c =
+      ivec3(floor((p + 0.5 * P.boundsSize.xyz) / P.smoothingRadius)) +
+      ivec3(1);
+  return clamp(c, ivec3(0), ivec3(P.grid.xyz) - ivec3(1));
+}
+uint cellKey(ivec3 c) {
+  return (uint(c.z) * P.grid.y + uint(c.y)) * P.grid.x + uint(c.x);
+}
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  if (index >= W.capacity)
+    return;
+
+  if (W.enabled == 0u) {
+    WhiteParticle particle = whiteParticles[index];
+    particle.positionLife.w = 0.0;
+    whiteParticles[index] = particle;
+    if (atomicExchange(whitewaterSlotStates[index], 0u) != 0u)
+      atomicAdd(whitewaterActiveCount, 0xffffffffu);
+    return;
+  }
+  if (whitewaterSlotStates[index] == 0u)
+    return;
+
+  WhiteParticle particle = whiteParticles[index];
+  particle.positionLife.w -= P.deltaT;
+  if (particle.positionLife.w <= 0.0) {
+    particle.positionLife.w = 0.0;
+    whiteParticles[index] = particle;
+    if (atomicExchange(whitewaterSlotStates[index], 0u) != 0u)
+      atomicAdd(whitewaterActiveCount, 0xffffffffu);
+    return;
+  }
+
+  vec3 position = particle.positionLife.xyz;
+  vec3 velocity = particle.velocityScale.xyz;
+  float h = P.smoothingRadius;
+  float h2 = h * h;
+  ivec3 center = gridCell(position);
+  int rowStride = int(P.grid.x);
+  int sliceStride = rowStride * int(P.grid.y);
+  int centerKey = int(cellKey(center));
+  int x0 = max(-1, -center.x);
+  int y0 = max(-1, -center.y);
+  int z0 = max(-1, -center.z);
+  int x1 = min(1, int(P.grid.x) - 1 - center.x);
+  int y1 = min(1, int(P.grid.y) - 1 - center.y);
+  int z1 = min(1, int(P.grid.z) - 1 - center.z);
+  uint neighbourCount = 0u;
+  vec3 velocitySum = vec3(0.0);
+  vec3 weightedOffsetSum = vec3(0.0);
+  float weightSum = 0.0;
+
+  for (int dz = z0; dz <= z1; ++dz)
+  for (int dy = y0; dy <= y1; ++dy)
+  for (int dx = x0; dx <= x1; ++dx) {
+    uint key = uint(centerKey + dz * sliceStride + dy * rowStride + dx);
+    uint start = startIndices[key];
+    if (start == 0xffffffffu)
+      continue;
+    uint end = endIndices[key];
+    for (uint e = start; e < end; ++e) {
+      vec3 offset = sortedPred[e].xyz - position;
+      float distanceSquared = dot(offset, offset);
+      if (distanceSquared >= h2)
+        continue;
+      float q = 1.0 - sqrt(distanceSquared) / h;
+      float weight = q * q;
+      velocitySum += sortedVel[e].xyz * weight;
+      weightedOffsetSum += offset * weight;
+      weightSum += weight;
+      ++neighbourCount;
+    }
+  }
+
+  vec3 halfBounds = 0.5 * P.boundsSize.xyz;
+
+  vec3 wallInward = vec3(0.0);
+  float wallProximitySum = 0.0;
+  for (int axis = 0; axis < 3; ++axis) {
+    if (axis == 1 && position.y >= 0.0)
+      continue;
+    float wallDistance = halfBounds[axis] - abs(position[axis]);
+    float proximity = 1.0 - clamp(wallDistance / h, 0.0, 1.0);
+    if (proximity > 0.0) {
+      wallInward[axis] = -sign(position[axis]) * proximity;
+      wallProximitySum += proximity;
+    }
+  }
+
+  uint wallNeighbourSupport =
+      neighbourCount > W.sprayMaxNeighbours
+          ? uint(round(min(10.0 * wallProximitySum, 16.0)))
+          : 0u;
+  uint classificationNeighbourCount =
+      neighbourCount + wallNeighbourSupport;
+
+  bool spray =
+      classificationNeighbourCount <= W.sprayMaxNeighbours;
+  bool bubble =
+      classificationNeighbourCount >= W.bubbleMinNeighbours;
+  vec3 fluidVelocity =
+      weightSum > P.epsilon ? velocitySum / weightSum : velocity;
+
+  if (spray) {
+    float speed = length(velocity);
+    vec3 drag = speed > P.epsilon
+                    ? -velocity * speed * W.sprayDrag
+                    : vec3(0.0);
+    velocity += (P.gravity.xyz + drag) * P.deltaT;
+  } else if (bubble) {
+    vec3 buoyancy = P.gravity.xyz * (1.0 - W.bubbleBuoyancy);
+    vec3 follow = (fluidVelocity - velocity) * W.fluidFollow;
+    velocity += (buoyancy + follow) * P.deltaT;
+  } else {
+    velocity = fluidVelocity;
+  }
+
+  position += velocity * P.deltaT;
+  if (!spray && !bubble && dot(weightedOffsetSum, weightedOffsetSum) >
+                                P.epsilon * P.epsilon) {
+    vec3 outward = -normalize(weightedOffsetSum);
+    for (int axis = 0; axis < 3; ++axis) {
+      if (wallInward[axis] != 0.0 &&
+          outward[axis] * wallInward[axis] < 0.0)
+        outward[axis] = 0.0;
+    }
+    float foamBand =
+        max(float(W.bubbleMinNeighbours - W.sprayMaxNeighbours), 1.0);
+    float excess =
+        max(float(classificationNeighbourCount) -
+                float(W.sprayMaxNeighbours + 1u),
+            0.0) /
+        foamBand;
+    if (dot(outward, outward) > P.epsilon * P.epsilon)
+      position += normalize(outward) *
+                  (h * 0.12 * clamp(excess, 0.0, 1.0));
+  }
+  for (int axis = 0; axis < 3; ++axis) {
+    if (abs(position[axis]) > halfBounds[axis]) {
+      float wallSign = sign(position[axis]);
+      float incomingNormalVelocity = velocity[axis];
+      bool sideWall = axis != 1;
+      if (spray && sideWall) {
+        position[axis] =
+            max(halfBounds[axis] - 0.05 * h, 0.0) * wallSign;
+        velocity *= 0.30;
+        velocity[axis] = -incomingNormalVelocity * 0.15;
+      } else if (bubble && sideWall) {
+        position[axis] =
+            max(halfBounds[axis] - 0.05 * h, 0.0) * wallSign;
+        velocity[axis] = -incomingNormalVelocity * 0.05;
+      } else {
+        position[axis] = halfBounds[axis] * wallSign;
+        velocity[axis] = -incomingNormalVelocity * 0.1;
+      }
+    }
+  }
+
+  particle.positionLife.xyz = position;
+  float encodedType = floor(particle.velocityScale.w * 0.5);
+  float currentScale = particle.velocityScale.w - encodedType * 2.0;
+  float targetScale = bubble ? W.bubbleScale : 1.0;
+  float scaleT = clamp(P.deltaT * 7.0, 0.0, 1.0);
+  float renderType = spray ? 0.0 : (bubble ? 2.0 : 1.0);
+  particle.velocityScale =
+      vec4(velocity,
+           mix(currentScale, targetScale, scaleT) + 2.0 * renderType);
+  whiteParticles[index] = particle;
+}
