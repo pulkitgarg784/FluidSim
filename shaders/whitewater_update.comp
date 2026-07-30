@@ -48,6 +48,7 @@ layout(std140, binding = 14) uniform WhitewaterParams {
   uint bubbleMinNeighbours;
   uint enabled;
   uint debugClassification;
+  uint activeCount;
 } W;
 struct WhiteParticle {
   vec4 positionLife;
@@ -117,15 +118,19 @@ void main() {
   vec3 weightedOffsetSum = vec3(0.0);
   float weightSum = 0.0;
 
-  for (int dz = z0; dz <= z1; ++dz)
-  for (int dy = y0; dy <= y1; ++dy)
-  for (int dx = x0; dx <= x1; ++dx) {
+  uint neighbourSearchLimit = max(W.bubbleMinNeighbours, 1u);
+
+  for (int dz = z0; dz <= z1 && neighbourCount < neighbourSearchLimit; ++dz)
+  for (int dy = y0; dy <= y1 && neighbourCount < neighbourSearchLimit; ++dy)
+  for (int dx = x0; dx <= x1 && neighbourCount < neighbourSearchLimit; ++dx) {
     uint key = uint(centerKey + dz * sliceStride + dy * rowStride + dx);
     uint start = startIndices[key];
     if (start == 0xffffffffu)
       continue;
     uint end = endIndices[key];
-    for (uint e = start; e < end; ++e) {
+    for (uint e = start;
+         e < end && neighbourCount < neighbourSearchLimit;
+         ++e) {
       vec3 offset = sortedPred[e].xyz - position;
       float distanceSquared = dot(offset, offset);
       if (distanceSquared >= h2)

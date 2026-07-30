@@ -42,6 +42,7 @@ layout(std140, binding = 14) uniform WhitewaterParams {
   uint bubbleMinNeighbours;
   uint enabled;
   uint debugClassification;
+  uint activeCount;
 } W;
 struct WhiteParticle {
   vec4 positionLife;
@@ -121,6 +122,8 @@ void main() {
   int z1 = min(1, int(P.grid.z) - 1 - center.z);
   vec3 force = vec3(0.0);
   uint neighbourCount = 0u;
+  bool canSpawn =
+      W.enabled != 0u && W.capacity != 0u && W.activeCount < W.capacity;
   float weightedVelocityDifference = 0.0;
   vec3 weightedNeighbourOffset = vec3(0.0);
   float surfaceWeightSum = 0.0;
@@ -141,16 +144,18 @@ void main() {
       float dst = sqrt(dst2);
       vec3 dir = (dst < P.epsilon) ? randomDir(idx * P.numParticles + e)
                                    : offset / dst;
-      vec3 relativeVelocity = vi - sortedVel[e].xyz;
-      float relativeSpeed = length(relativeVelocity);
-      vec3 relativeDirection =
-          relativeVelocity / max(relativeSpeed, P.epsilon);
-      float convergence = 1.0 - dot(relativeDirection, -dir);
-      float influence = 1.0 - dst / h;
-      weightedVelocityDifference +=
-          relativeSpeed * convergence * influence;
-      weightedNeighbourOffset += offset * influence;
-      surfaceWeightSum += influence;
+      if (canSpawn) {
+        vec3 relativeVelocity = vi - sortedVel[e].xyz;
+        float relativeSpeed = length(relativeVelocity);
+        vec3 relativeDirection =
+            relativeVelocity / max(relativeSpeed, P.epsilon);
+        float convergence = 1.0 - dot(relativeDirection, -dir);
+        float influence = 1.0 - dst / h;
+        weightedVelocityDifference +=
+            relativeSpeed * convergence * influence;
+        weightedNeighbourOffset += offset * influence;
+        surfaceWeightSum += influence;
+      }
       vec2 densityJ = max(densities[e], vec2(P.epsilon));
       float dj = densityJ.x;
       float sharedPressure = 0.5 * (pressureFromDensity(dj) + pressureI);
@@ -171,7 +176,7 @@ void main() {
     velocity -= velocity * (0.75 * P.deltaT);
   sortedVel[idx] = vec4(velocity, 0.0);
 
-  if (W.enabled != 0u && W.capacity != 0u) {
+  if (canSpawn) {
     float trappedAir =
         remap01(weightedVelocityDifference, W.trappedAirMin, W.trappedAirMax);
     float kinetic =

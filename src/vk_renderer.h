@@ -111,6 +111,7 @@ struct alignas(16) WhitewaterParams {
   uint32_t bubbleMinNeighbours;
   uint32_t enabled;
   uint32_t debugClassification;
+  uint32_t activeCount;
 };
 static_assert(sizeof(WhitewaterParams) == 80 &&
                   alignof(WhitewaterParams) == 16 &&
@@ -130,7 +131,8 @@ static_assert(sizeof(WhitewaterParams) == 80 &&
                   offsetof(WhitewaterParams, sprayMaxNeighbours) == 52 &&
                   offsetof(WhitewaterParams, bubbleMinNeighbours) == 56 &&
                   offsetof(WhitewaterParams, enabled) == 60 &&
-                  offsetof(WhitewaterParams, debugClassification) == 64,
+                  offsetof(WhitewaterParams, debugClassification) == 64 &&
+                  offsetof(WhitewaterParams, activeCount) == 68,
               "WhitewaterParams must match the std140 shader block");
 
 struct WhiteParticle {
@@ -276,12 +278,12 @@ struct FluidRenderSettings {
 struct WhitewaterSettings {
   bool enabled = true;
   float spawnRate = 120.0f;
-  float trappedAirMin = 15.0f;
-  float trappedAirMax = 25.0f;
+  float trappedAirMin = 10.0f;
+  float trappedAirMax = 20.0f;
   float kineticEnergyMin = 15.0f;
   float kineticEnergyMax = 30.0f;
-  float lifetimeMin = 5.0f;
-  float lifetimeMax = 15.0f;
+  float lifetimeMin = 2.0f;
+  float lifetimeMax = 12.0f;
   float bubbleBuoyancy = 1.4f;
   float sprayDrag = 0.04f;
   float fluidFollow = 3.0f;
@@ -663,6 +665,7 @@ public:
     whitewater.enabled = whitewaterSettings_.enabled ? 1u : 0u;
     whitewater.debugClassification =
         debugVisualization_.mode == kDebugWhitewaterClassification ? 1u : 0u;
+    whitewater.activeCount = activeWhitewaterParticleCount_;
     std::memcpy(whitewaterParamsBuffers_[currentFrame_].mapped, &whitewater,
                 sizeof(whitewater));
 

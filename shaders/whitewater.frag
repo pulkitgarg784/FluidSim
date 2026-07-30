@@ -23,6 +23,7 @@ layout(std140, binding = 14) uniform WhitewaterParams {
   uint bubbleMinNeighbours;
   uint enabled;
   uint debugClassification;
+  uint activeCount;
 } W;
 layout(push_constant) uniform PC {
   mat4 view;

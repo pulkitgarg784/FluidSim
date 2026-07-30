@@ -20,6 +20,7 @@ layout(std140, binding = 14) uniform WhitewaterParams {
   uint bubbleMinNeighbours;
   uint enabled;
   uint debugClassification;
+  uint activeCount;
 } W;
 struct WhiteParticle {
   vec4 positionLife;
