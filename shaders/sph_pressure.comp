@@ -177,42 +177,82 @@ void main() {
   sortedVel[idx] = vec4(velocity, 0.0);
 
   if (canSpawn) {
+    vec3 halfBounds = 0.5 * P.boundsSize.xyz;
+    vec3 wallInward = vec3(0.0);
+    float wallProximitySum = 0.0;
+    float solidBoundarySpawnMask = 1.0;
+    for (int axis = 0; axis < 3; ++axis) {
+      if (axis == 1 && pi.y >= 0.0)
+        continue;
+      float wallDistance = halfBounds[axis] - abs(pi[axis]);
+      float proximity = 1.0 - clamp(wallDistance / h, 0.0, 1.0);
+      float clearanceFromCollisionPlane =
+          wallDistance - 0.5 * h;
+      solidBoundarySpawnMask =
+          min(solidBoundarySpawnMask,
+              clamp(clearanceFromCollisionPlane / h, 0.0, 1.0));
+      if (proximity > 0.0) {
+        wallInward[axis] = -sign(pi[axis]) * proximity;
+        wallProximitySum += proximity;
+      }
+    }
+    uint wallNeighbourSupport =
+        neighbourCount > 0u
+            ? uint(round(min(10.0 * wallProximitySum, 16.0)))
+            : 0u;
+    uint classificationNeighbourCount =
+        neighbourCount + wallNeighbourSupport;
+
     float trappedAir =
         remap01(weightedVelocityDifference, W.trappedAirMin, W.trappedAirMax);
     float kinetic =
         remap01(dot(vi, vi), W.kineticEnergyMin, W.kineticEnergyMax);
     float impactKinetic = remap01(dot(vi, vi), 3.0, 15.0);
+    float floorClearance =
+        pi.y + halfBounds.y - 0.5 * h;
+    float floorImpactMask = clamp(floorClearance / h, 0.0, 1.0);
     float downwardImpact =
         remap01(-vi.y, 1.0, 3.5) *
-        remap01(weightedVelocityDifference, 5.0, 15.0);
+        remap01(weightedVelocityDifference, 5.0, 15.0) *
+        floorImpactMask;
 
     float waveCrest = 0.0;
     float speed = length(vi);
     if (surfaceWeightSum > P.epsilon && speed > P.epsilon &&
-        neighbourCount < W.bubbleMinNeighbours) {
+        classificationNeighbourCount < W.bubbleMinNeighbours) {
       vec3 outwardNormal = -normalize(weightedNeighbourOffset);
-      float normalAlignment = dot(vi / speed, outwardNormal);
-      float outwardSpeed = max(dot(vi, outwardNormal), 0.0);
-      float neighbourBand =
-          max(float(W.bubbleMinNeighbours - W.sprayMaxNeighbours), 1.0);
-      float surfaceExposure =
-          1.0 - clamp((float(neighbourCount) -
-                       float(W.sprayMaxNeighbours)) /
-                          neighbourBand,
-                      0.0, 1.0);
-      float surfaceAsymmetry =
-          clamp(length(weightedNeighbourOffset) /
-                    (h * surfaceWeightSum),
-                0.0, 1.0);
-      waveCrest = surfaceExposure * surfaceAsymmetry *
-                  remap01(normalAlignment, 0.6, 1.0) *
-                  remap01(outwardSpeed, 0.5, 2.5);
+      for (int axis = 0; axis < 3; ++axis) {
+        if (wallInward[axis] != 0.0 &&
+            outwardNormal[axis] * wallInward[axis] < 0.0)
+          outwardNormal[axis] = 0.0;
+      }
+      if (dot(outwardNormal, outwardNormal) >
+          P.epsilon * P.epsilon) {
+        outwardNormal = normalize(outwardNormal);
+        float normalAlignment = dot(vi / speed, outwardNormal);
+        float outwardSpeed = max(dot(vi, outwardNormal), 0.0);
+        float neighbourBand =
+            max(float(W.bubbleMinNeighbours - W.sprayMaxNeighbours), 1.0);
+        float surfaceExposure =
+            1.0 - clamp((float(classificationNeighbourCount) -
+                         float(W.sprayMaxNeighbours)) /
+                            neighbourBand,
+                        0.0, 1.0);
+        float surfaceAsymmetry =
+            clamp(length(weightedNeighbourOffset) /
+                      (h * surfaceWeightSum),
+                  0.0, 1.0);
+        waveCrest = surfaceExposure * surfaceAsymmetry *
+                    remap01(normalAlignment, 0.6, 1.0) *
+                    remap01(outwardSpeed, 0.5, 2.5);
+      }
     }
 
     float generationPotential =
         trappedAir * kinetic +
         0.50 * downwardImpact * impactKinetic +
         0.35 * waveCrest * impactKinetic;
+    generationPotential *= solidBoundarySpawnMask;
     float expected = W.generationRate * generationPotential * P.deltaT;
     uint rng = idx * 9781u + floatBitsToUint(pi.x) * 6271u +
                floatBitsToUint(pi.y) * 13007u +
@@ -242,9 +282,11 @@ void main() {
           continue;
         atomicAdd(whitewaterActiveCount, 1u);
         uint initialType =
-            neighbourCount <= W.sprayMaxNeighbours
+            classificationNeighbourCount <= W.sprayMaxNeighbours
                 ? 0u
-                : (neighbourCount >= W.bubbleMinNeighbours ? 2u : 1u);
+                : (neighbourCount >= W.bubbleMinNeighbours
+                       ? 2u
+                       : 1u);
         float initialScale = 0.5 * (1.0 + W.bubbleScale);
         whiteParticles[slot].positionLife = vec4(spawnPosition, life);
         whiteParticles[slot].velocityScale =

@@ -25,7 +25,7 @@ constexpr float3 gravity = float3(0.0f, -9.8f, 0.0f);
 
 constexpr float smoothingRadius = 0.12f * particleScale;
 constexpr float particleMass = 0.25f;
-constexpr float collisionDamping = 0.95f;    // velocity kept on a wall bounce
+constexpr float collisionDamping = 0.2f;    // velocity kept on a wall bounce
 constexpr float3 boundsSize = float3(8.77f, 4.20f, 2.92f); // simulation box extents
 constexpr float targetDensity = 2315.0f;
 constexpr float pressureMultiplier = 16.0f;
@@ -73,12 +73,18 @@ struct Particle {
 
   // reflect the velocity component when a wall is crossed
   void resolveCollisions() {
-    const float3 halfBounds = boundsSize * 0.5f;
+    const float3 halfBounds =
+        boundsSize * 0.5f - float3(0.5f * smoothingRadius);
     for (int axis = 0; axis < 3; axis++) {
       if (std::abs(position[axis]) > halfBounds[axis]) {
+        const float normal = (position[axis] < 0.0f) ? -1.0f : 1.0f;
+        const float penetration =
+            std::abs(position[axis]) - halfBounds[axis];
         position[axis] =
-            halfBounds[axis] * ((position[axis] > 0) ? 1.0f : -1.0f);
-        velocity[axis] *= -collisionDamping;
+            std::clamp(normal * (halfBounds[axis] - penetration),
+                       -halfBounds[axis], halfBounds[axis]);
+        if (velocity[axis] * normal > 0.0f)
+          velocity[axis] *= -collisionDamping;
       }
     }
   }

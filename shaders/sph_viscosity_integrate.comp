@@ -63,11 +63,18 @@ void main() {
   vec3 velocity = vi + viscosity * P.viscosityStrength * P.deltaT;
 
   vec3 position = sortedPos[idx].xyz + velocity * P.deltaT;
-  vec3 halfBounds = 0.5 * P.boundsSize.xyz;
+  vec3 halfBounds =
+      max(0.5 * P.boundsSize.xyz - vec3(0.5 * P.smoothingRadius),
+          vec3(P.epsilon));
   for (int axis = 0; axis < 3; ++axis) {
     if (abs(position[axis]) > halfBounds[axis]) {
-      position[axis] = halfBounds[axis] * sign(position[axis]);
-      velocity[axis] *= -P.collisionDamping;
+      float normal = position[axis] < 0.0 ? -1.0 : 1.0;
+      float penetration = abs(position[axis]) - halfBounds[axis];
+      position[axis] =
+          clamp(normal * (halfBounds[axis] - penetration),
+                -halfBounds[axis], halfBounds[axis]);
+      if (velocity[axis] * normal > 0.0)
+        velocity[axis] *= -P.collisionDamping;
     }
   }
 
