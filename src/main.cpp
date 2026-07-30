@@ -23,7 +23,6 @@
 using namespace linalg::aliases;
 
 constexpr float PI = 3.14159265358979f;
-constexpr float DegToRad = PI / 180.0f;
 constexpr float mouseLookSpeed = 0.2f; // mouse look sensitivity
 constexpr float moveSpeed = 1.5f;      // keyboard movement
 constexpr float interactionRadius = 1.5f;
@@ -34,8 +33,6 @@ const float3 tankSize(8.77f, 4.20f, 2.92f);
 
 const float3 waterMin(-4.27f, -1.98f, -1.34f);
 const float3 waterMax(-2.19f, 1.69f, 1.34f);
-
-constexpr uint32_t initialParticleCount = sph::defaultFluidParticleCount;
 
 static float3 globalEye = float3(0.0f, 5.0f, 14.0f);
 static float3 globalLookat = float3(0.0f, 0.0f, 0.0f);
@@ -106,8 +103,8 @@ static void cursorPosFunc(GLFWwindow *window, double mouse_x, double mouse_y) {
     const float yfact = -mouseLookSpeed * float(mouse_x - m_mouseX);
     float3 v = globalViewDir;
 
-    v = utils::Utils::rotateVector(xfact * DegToRad, v, globalRight);
-    v = utils::Utils::rotateVector(yfact * DegToRad, v, globalUp);
+    v = utils::rotateVector(xfact * utils::degreesToRadians, v, globalRight);
+    v = utils::rotateVector(yfact * utils::degreesToRadians, v, globalUp);
     globalViewDir = v;
     globalLookat = globalEye + globalViewDir;
     globalRight = cross(globalViewDir, globalUp);
@@ -161,11 +158,11 @@ int main(int argc, char **argv) {
   constexpr int width = 1024;
   constexpr int height = 768;
 
-  uint32_t particleCount = initialParticleCount;
+  uint32_t particleCount = sph::defaultFluidParticleCount;
   std::string scenePath = "media/fluid_container.obj";
   float sceneScale = 1.0f;
   for (int arg = 1; arg < argc; ++arg) {
-    std::string flag = argv[arg];
+    std::string_view flag = argv[arg];
     if (flag == "--particles" && arg + 1 < argc) {
       ++arg;
       if (!parseParticleCount(argv[arg], particleCount)) {
@@ -193,11 +190,6 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (particleCount == 0 || particleCount > sph::maxParticles) {
-    std::fprintf(stderr, "Particle count must be between 1 and %u\n",
-                 sph::maxParticles);
-    return 1;
-  }
   const float densityRatio =
       float(particleCount) / float(sph::referenceParticleCount);
   const float particleScale = std::cbrt(1.0f / densityRatio);
@@ -323,9 +315,8 @@ int main(int argc, char **argv) {
       framebufferHeight = std::max(framebufferHeight, 1);
       const float aspect = float(framebufferWidth) / float(framebufferHeight);
       const float4x4 proj =
-          utils::Utils::perspectiveVK(45.0f, aspect, 0.01f, 100.0f);
-      const float4x4 view =
-          utils::Utils::lookAt(globalEye, globalLookat, globalUp);
+          utils::perspectiveVK(45.0f, aspect, 0.01f, 100.0f);
+      const float4x4 view = utils::lookAt(globalEye, globalLookat, globalUp);
 
       // Shift+Left click attracts the fluid, Shift+Right click repels it.
       const bool shiftHeld =
@@ -334,7 +325,7 @@ int main(int argc, char **argv) {
       float interactionStrengthSigned = 0.0f;
       float3 interactionPoint = float3(0.0f);
       if (shiftHeld && (mouseLeftPressed || mouseRightPressed)) {
-        float3 rayDir = utils::Utils::mouseRayDirection(
+        float3 rayDir = utils::mouseRayDirection(
             m_mouseX, m_mouseY, windowWidth, windowHeight, 45.0f, aspect,
             globalViewDir, globalRight);
         float3 planeNormal = -globalViewDir; // faces the camera

@@ -300,10 +300,6 @@ enum DebugVisualizationMode : int {
   kDebugFluidPressure = 3,
 };
 
-struct DebugVisualizationSettings {
-  int mode = kDebugNone;
-};
-
 inline void vkCheck(VkResult r, const char *what) {
   if (r != VK_SUCCESS) {
     throw std::runtime_error(std::string("Vulkan error in ") + what + ": " +
@@ -554,15 +550,15 @@ public:
     constexpr const char *debugModes[] = {
         "Off", "Whitewater", "Particle velocity",
         "Particle pressure"};
-    ImGui::Combo("View", &debugVisualization_.mode, debugModes,
+    ImGui::Combo("View", &debugMode_, debugModes,
                  static_cast<int>(std::size(debugModes)));
-    if (debugVisualization_.mode == kDebugWhitewaterClassification) {
+    if (debugMode_ == kDebugWhitewaterClassification) {
       ImGui::TextColored(ImVec4(1, 0, 0, 1), "Red: spray");
       ImGui::TextColored(ImVec4(0, 1, 0, 1), "Green: foam");
       ImGui::TextColored(ImVec4(0, 0.45f, 1, 1), "Blue: bubbles");
-    } else if (debugVisualization_.mode == kDebugFluidVelocity) {
+    } else if (debugMode_ == kDebugFluidVelocity) {
       ImGui::TextUnformatted("Blue: still   Cyan/Yellow: medium   Red: fast");
-    } else if (debugVisualization_.mode == kDebugFluidPressure) {
+    } else if (debugMode_ == kDebugFluidPressure) {
       ImGui::TextUnformatted(
           "Blue: negative   White: near zero   Red: positive");
     } else {
@@ -664,7 +660,7 @@ public:
         static_cast<uint32_t>(whitewaterSettings_.bubbleMinNeighbours);
     whitewater.enabled = whitewaterSettings_.enabled ? 1u : 0u;
     whitewater.debugClassification =
-        debugVisualization_.mode == kDebugWhitewaterClassification ? 1u : 0u;
+        debugMode_ == kDebugWhitewaterClassification ? 1u : 0u;
     whitewater.activeCount = activeWhitewaterParticleCount_;
     std::memcpy(whitewaterParamsBuffers_[currentFrame_].mapped, &whitewater,
                 sizeof(whitewater));
@@ -699,7 +695,7 @@ public:
         float4(fluidSettings_.refractionStrength,
                fluidSettings_.absorptionScale,
                fluidSettings_.baseReflectance,
-               static_cast<float>(debugVisualization_.mode));
+               static_cast<float>(debugMode_));
     wp.extinction =
         float4(fluidSettings_.extinctionRed, fluidSettings_.extinctionGreen,
                fluidSettings_.extinctionBlue, 0.0f);
@@ -1065,7 +1061,7 @@ private:
   std::array<AllocatedBuffer, kMaxFramesInFlight>
       whitewaterCountReadbackBuffers_;
   WhitewaterSettings whitewaterSettings_{};
-  DebugVisualizationSettings debugVisualization_{};
+  int debugMode_ = kDebugNone;
   float whitewaterSimulationTime_ = 0.0f;
   uint32_t activeWhitewaterParticleCount_ = 0;
   std::array<AllocatedBuffer, kMaxFramesInFlight> sceneLightingBuffers_;
@@ -2840,7 +2836,7 @@ private:
     // Whitewater is rendered into a separate nearest depth mask
     std::array<VkClearValue, 2> whitewaterClears{};
     whitewaterClears[0].color = {{
-        debugVisualization_.mode == kDebugWhitewaterClassification
+        debugMode_ == kDebugWhitewaterClassification
             ? -100.0f
             : kNoSurfaceDepth,
         0, 0, 0}};
@@ -3195,14 +3191,14 @@ private:
                            VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(WaterPush), &wp);
     vkCmdDraw(cmd, 3, 1, 0, 0); // fullscreen triangle
-    if (debugVisualization_.mode == kDebugFluidVelocity ||
-        debugVisualization_.mode == kDebugFluidPressure) {
+    if (debugMode_ == kDebugFluidVelocity ||
+        debugMode_ == kDebugFluidPressure) {
       FluidDebugPush debugPush{};
       debugPush.view = dp.view;
       debugPush.proj = dp.proj;
       debugPush.camRight = dp.camRight;
       debugPush.camUp = dp.camUp;
-      debugPush.debugMode = debugVisualization_.mode;
+      debugPush.debugMode = debugMode_;
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                         fluidDebugPipeline_);
       vkCmdPushConstants(cmd, depthPipelineLayout_,
