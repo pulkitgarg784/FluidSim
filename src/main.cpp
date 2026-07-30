@@ -27,6 +27,7 @@ constexpr float mouseLookSpeed = 0.2f; // mouse look sensitivity
 constexpr float moveSpeed = 1.5f;      // keyboard movement
 constexpr float interactionRadius = 1.5f;
 constexpr float interactionStrength = 40.0f;
+constexpr float physicsTimeStep = 1 / 75.0f;
 
 // width, height, length
 const float3 tankSize(8.77f, 4.20f, 2.92f);
@@ -195,7 +196,7 @@ int main(int argc, char **argv) {
   const float particleScale = std::cbrt(1.0f / densityRatio);
   const float smoothingRadius = 0.12f * particleScale;
   const float particleMass = 1.0f / densityRatio;
-  const float simulationDeltaT = 0.002f * particleScale;
+  const float simulationDeltaT = physicsTimeStep;
   const float renderRadius = 0.068f * particleScale;
 
   const uint32_t gridX =
@@ -287,6 +288,7 @@ int main(int argc, char **argv) {
   }
 
   double lastTime = glfwGetTime();
+  double physicsAccumulator = 0.0;
 
   try {
     while (!renderer.shouldClose()) {
@@ -294,9 +296,10 @@ int main(int argc, char **argv) {
       renderer.beginImGuiFrame();
 
       const double now = glfwGetTime();
-      float dt = float(now - lastTime);
+      const double elapsedTime = std::min(now - lastTime, 0.1);
       lastTime = now;
-      dt = std::min(dt, 0.1f);
+      const float dt = static_cast<float>(elapsedTime);
+      physicsAccumulator += elapsedTime;
 
       globalViewDir = normalize(globalLookat - globalEye);
       globalRight = normalize(cross(globalViewDir, globalUp));
@@ -343,9 +346,13 @@ int main(int argc, char **argv) {
       renderer.setInteraction(interactionPoint, interactionRadius,
                               interactionStrengthSigned);
 
-      const int substeps = renderer.simulationSubsteps();
+      const int physicsSteps =
+          physicsAccumulator >= static_cast<double>(physicsTimeStep) ? 1 : 0;
+      if (physicsSteps != 0)
+        physicsAccumulator =
+            std::fmod(physicsAccumulator, static_cast<double>(physicsTimeStep));
       renderer.drawFrame(view, proj, globalRight, camUp, globalViewDir,
-                         renderRadius, substeps);
+                         renderRadius, physicsSteps);
     }
   } catch (const std::exception &e) {
     std::fprintf(stderr, "Runtime error: %s\n", e.what());

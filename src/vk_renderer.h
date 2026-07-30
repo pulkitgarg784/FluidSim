@@ -271,8 +271,6 @@ struct FluidRenderSettings {
   float sunElevationDegrees = 53.0f;
   float shadowAmbientLight = 0.17f;
   int shadowUpdateInterval = 2;
-  int simulationSubsteps = 1;
-  float simulationRate = 10.0f;
 };
 
 struct WhitewaterSettings {
@@ -439,15 +437,6 @@ public:
     if (ImGui::IsItemHovered())
       ImGui::SetTooltip("Restore the fluid to its initial state and clear "
                         "all whitewater particles.");
-    ImGui::SliderInt("Simulation substeps", &fluidSettings_.simulationSubsteps,
-                     1, 8);
-    ImGui::SliderFloat("Simulation rate", &fluidSettings_.simulationRate, 0.25f,
-                       10.0f, "%.2fx", ImGuiSliderFlags_Logarithmic);
-    const int activeSubsteps = simulationSubsteps();
-    float frameDt = baseDeltaT_ * fluidSettings_.simulationRate;
-    ImGui::Text("Simulated dt/frame: %.4f", frameDt);
-    ImGui::Text("Active substeps: %d (dt %.5f)", activeSubsteps,
-                frameDt / static_cast<float>(activeSubsteps));
     {
       SphParams &physics = liveSphParams_;
       ImGui::Separator();
@@ -465,8 +454,6 @@ public:
                          1.0f, "%.2f");
       if (ImGui::Button("Reset water preset")) {
         physics = defaultSphParams_;
-        fluidSettings_.simulationSubsteps = 1;
-        fluidSettings_.simulationRate = 10.0f;
       }
     }
     ImGui::Separator();
@@ -567,10 +554,6 @@ public:
     ImGui::End();
   }
 
-  int simulationSubsteps() const {
-    return std::max(fluidSettings_.simulationSubsteps, 1);
-  }
-
   void setParams(const SphParams &params) {
     if (params.grid[3] > startCapacity_)
       throw std::runtime_error("SPH grid exceeds start-index buffer capacity");
@@ -610,10 +593,9 @@ public:
     uploadViaStaging(velocitiesBuf_, velocities.data(), uploadSize);
   }
 
-  // Advance the simulation `substeps` times on the GPU, then draw one frame.
   void drawFrame(const float4x4 &view, const float4x4 &proj,
                  const float3 &camRight, const float3 &camUp,
-                 const float3 &camForward, float radius, int substeps) {
+                 const float3 &camForward, float radius, int physicsSteps) {
     vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE,
                     UINT64_MAX);
     if (restartRequested_) {
@@ -629,14 +611,13 @@ public:
     }
 
     SphParams frameParams = liveSphParams_;
-    frameParams.deltaT = baseDeltaT_ * fluidSettings_.simulationRate /
-                         float(std::max(substeps, 1));
+    frameParams.deltaT = baseDeltaT_;
     std::memcpy(paramsBuffers_[currentFrame_].mapped, &frameParams,
                 sizeof(frameParams));
     std::memcpy(interactionBuffers_[currentFrame_].mapped, &pendingInteraction_,
                 sizeof(InteractionParams));
-    whitewaterSimulationTime_ += frameParams.deltaT *
-                                 static_cast<float>(std::max(substeps, 1));
+    whitewaterSimulationTime_ +=
+        frameParams.deltaT * static_cast<float>(physicsSteps);
     const float fadeT =
         std::clamp((whitewaterSimulationTime_ - 0.2f) / 0.35f, 0.0f, 1.0f);
     WhitewaterParams whitewater{};
@@ -705,7 +686,7 @@ public:
 
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
     vkResetCommandBuffer(cmd, 0);
-    recordCommandBuffer(cmd, imageIndex, dp, wp, substeps);
+    recordCommandBuffer(cmd, imageIndex, dp, wp, physicsSteps);
     ++renderedFrameCount_;
 
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -2747,7 +2728,7 @@ private:
 
   void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex,
                            const DepthPush &dp, const WaterPush &wp,
-                           int substeps) {
+                           int physicsSteps) {
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkCheck(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer");
 
@@ -2760,7 +2741,7 @@ private:
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             computePipelineLayout_, 0, 1, &computeSet, 0,
                             nullptr);
-    for (int s = 0; s < substeps; ++s) {
+    for (int step = 0; step < physicsSteps; ++step) {
       dispatchStage(cmd, computePipelines_[0],
                     groupsN); // external + exact keys
       radixSort(cmd);         // sort keys + indices
@@ -2776,7 +2757,7 @@ private:
       dispatchStage(cmd, computePipelines_[6],
                     groupsN); // viscosity + integrate + collision
       dispatchStage(cmd, computePipelines_[7], groupsWhitewater,
-                    s + 1 < substeps); // classify and advect whitewater
+                    step + 1 < physicsSteps); // classify and advect whitewater
     }
 
     VkBufferMemoryBarrier countToTransfer{
