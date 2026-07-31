@@ -1,13 +1,41 @@
-# Materials for fluid_container.obj
-
 newmtl floor
 Ka 0.08 0.09 0.10
 Kd 0.19 0.21 0.23
 Ks 0.04 0.04 0.04
 Ns 16.0
 
-newmtl obstacle
-Ka 0.12 0.06 0.02
-Kd 0.42 0.20 0.08
-Ks 0.12 0.10 0.08
-Ns 32.0
+newmtl pencil_yellow
+Ka 0.18 0.12 0.01
+Kd 0.92 0.62 0.04
+Ks 0.18 0.15 0.08
+Ns 48.0
+
+newmtl pencil_yellow_dark
+Ka 0.12 0.07 0.01
+Kd 0.62 0.34 0.02
+Ks 0.12 0.10 0.05
+Ns 40.0
+
+newmtl metal
+Ka 0.12 0.13 0.14
+Kd 0.55 0.58 0.62
+Ks 0.75 0.78 0.82
+Ns 128.0
+
+newmtl eraser
+Ka 0.16 0.05 0.07
+Kd 0.82 0.27 0.38
+Ks 0.12 0.08 0.09
+Ns 24.0
+
+newmtl wood
+Ka 0.17 0.11 0.06
+Kd 0.78 0.58 0.34
+Ks 0.08 0.06 0.04
+Ns 20.0
+
+newmtl graphite
+Ka 0.025 0.025 0.030
+Kd 0.09 0.09 0.11
+Ks 0.18 0.18 0.20
+Ns 64.0
