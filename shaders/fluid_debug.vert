@@ -22,11 +22,11 @@ layout(std140, binding = 5) uniform Params {
   float epsilon;
   uvec4 grid;
 } P;
-layout(std430, binding = 9) readonly buffer SortedPositions {
-  vec4 sortedPositions[];
+layout(std430, binding = 0) readonly buffer Positions {
+  vec4 positions[];
 };
-layout(std430, binding = 10) readonly buffer SortedVelocities {
-  vec4 sortedVelocities[];
+layout(std430, binding = 1) readonly buffer Velocities {
+  vec4 velocities[];
 };
 
 layout(push_constant) uniform PC {
@@ -46,7 +46,7 @@ const float DEBUG_PARTICLE_RADIUS_SCALE = 0.2833333333;
 
 void main() {
   uint index = gl_InstanceIndex;
-  vec3 center = sortedPositions[index].xyz;
+  vec3 center = positions[index].xyz;
   float radius = P.smoothingRadius * DEBUG_PARTICLE_RADIUS_SCALE;
   vec3 world =
       center +
@@ -57,7 +57,7 @@ void main() {
   bool pressureMode = pc.debugMode == 3;
   vValue = pressureMode
                ? (densities[index].x - P.targetDensity) * P.pressureMultiplier
-               : length(sortedVelocities[index].xyz);
+               : length(velocities[index].xyz);
   vUV = inCorner;
   vViewCenter = (pc.view * vec4(center, 1.0)).xyz;
   vRadius = radius;

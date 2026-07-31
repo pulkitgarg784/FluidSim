@@ -67,6 +67,11 @@ void main() {
       max(0.5 * P.boundsSize.xyz - vec3(0.5 * P.smoothingRadius),
           vec3(P.epsilon));
   for (int axis = 0; axis < 3; ++axis) {
+    if (axis == 1 && position.y < -halfBounds.y) {
+      position.y = -halfBounds.y;
+      velocity.y = max(velocity.y, 0.0);
+      continue;
+    }
     if (abs(position[axis]) > halfBounds[axis]) {
       float normal = position[axis] < 0.0 ? -1.0 : 1.0;
       float penetration = abs(position[axis]) - halfBounds[axis];
