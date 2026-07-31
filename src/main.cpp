@@ -35,7 +35,7 @@ const float3 tankSize(8.77f, 4.20f, 2.92f);
 const float3 waterMin(-4.27f, -1.98f, -1.34f);
 const float3 waterMax(-2.19f, 1.69f, 1.34f);
 
-static float3 globalEye = float3(0.0f, 5.0f, 14.0f);
+static float3 globalEye = float3(0.0f, 6.0f, 17.0f);
 static float3 globalLookat = float3(0.0f, 0.0f, 0.0f);
 static float3 globalUp = normalize(float3(0.0f, 1.0f, 0.0f));
 static float3 globalViewDir = normalize(globalLookat - globalEye);

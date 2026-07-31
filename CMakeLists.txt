@@ -83,6 +83,12 @@ add_executable(CS488
     src/vk_radix_sort_impl.cpp)
 add_dependencies(CS488 shaders)
 
+# Keep the demo scenes and HDR environment with the build output so the
+# executable does not depend on its working directory or source checkout.
+add_custom_command(TARGET CS488 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/media ${CMAKE_BINARY_DIR}/media)
+
 target_include_directories(CS488 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/external/vulkan_radix_sort/include
@@ -90,7 +96,7 @@ target_include_directories(CS488 PRIVATE
 
 target_compile_definitions(CS488 PRIVATE
     SHADER_DIR="${SHADER_OUT_DIR}"
-    ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    ASSET_DIR="${CMAKE_BINARY_DIR}")
 
 target_link_libraries(CS488 PRIVATE Vulkan::Vulkan imgui)
 

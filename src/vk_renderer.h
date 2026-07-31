@@ -428,16 +428,26 @@ public:
     const uint32_t totalParticleCount =
         numParticles_ + activeWhitewaterParticleCount_;
 
-    ImGui::Begin("Fluid controls");
-    ImGui::Text("Particles: %u total (%u fluid + %u whitewater)",
+    constexpr float panelMargin = 10.0f;
+    constexpr float panelWidth = 270.0f;
+    constexpr float panelGap = 10.0f;
+    constexpr float debugPanelWidth = 200.0f;
+    const float panelColumnHeight = std::max(
+        1.0f, ImGui::GetIO().DisplaySize.y - 2.0f * panelMargin - panelGap);
+    const float simulationPanelHeight = panelColumnHeight * 0.45f;
+    ImGui::SetNextWindowPos(ImVec2(panelMargin, panelMargin),
+                            ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(panelWidth, simulationPanelHeight),
+                             ImGuiCond_Once);
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    ImGui::Begin("Simulation controls");
+    ImGui::PushItemWidth(100.0f);
+    ImGui::Text("Particles: %u \nTotal (%u fluid + %u whitewater)",
                 totalParticleCount, numParticles_,
                 activeWhitewaterParticleCount_);
     ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
     if (ImGui::Button("Restart simulation"))
       restartRequested_ = true;
-    if (ImGui::IsItemHovered())
-      ImGui::SetTooltip("Restore the fluid to its initial state and clear "
-                        "all whitewater particles.");
     {
       SphParams &physics = liveSphParams_;
       ImGui::Separator();
@@ -463,44 +473,25 @@ public:
     ImGui::Separator();
     ImGui::TextUnformatted("Whitewater");
     ImGui::Checkbox("Enable whitewater", &whitewaterSettings_.enabled);
-    ImGui::Text("Secondary-particle capacity: %u", maxWhitewaterParticles_);
     ImGui::SliderFloat("Spawn rate", &whitewaterSettings_.spawnRate, 0.0f,
                        300.0f, "%.1f");
-    ImGui::SliderFloat("Trapped-air minimum",
-                       &whitewaterSettings_.trappedAirMin, 0.0f, 80.0f,
-                       "%.1f");
-    ImGui::SliderFloat("Trapped-air maximum",
-                       &whitewaterSettings_.trappedAirMax,
-                       whitewaterSettings_.trappedAirMin + 0.1f, 160.0f,
-                       "%.1f");
-    ImGui::SliderFloat("Kinetic minimum",
-                       &whitewaterSettings_.kineticEnergyMin, 0.0f, 100.0f,
-                       "%.1f");
-    ImGui::SliderFloat("Kinetic maximum",
-                       &whitewaterSettings_.kineticEnergyMax,
-                       whitewaterSettings_.kineticEnergyMin + 0.1f, 200.0f,
-                       "%.1f");
-    ImGui::SliderFloat("Minimum lifetime",
-                       &whitewaterSettings_.lifetimeMin, 0.25f, 20.0f,
-                       "%.1f s");
-    ImGui::SliderFloat("Maximum lifetime",
-                       &whitewaterSettings_.lifetimeMax,
-                       whitewaterSettings_.lifetimeMin, 30.0f, "%.1f s");
-    ImGui::SliderInt("Spray neighbour maximum",
-                     &whitewaterSettings_.sprayMaxNeighbours, 0, 12);
-    ImGui::SliderInt("Bubble neighbour minimum",
-                     &whitewaterSettings_.bubbleMinNeighbours,
-                     whitewaterSettings_.sprayMaxNeighbours + 1, 32);
-    ImGui::SliderFloat("Bubble buoyancy",
-                       &whitewaterSettings_.bubbleBuoyancy, 1.0f, 3.0f,
-                       "%.2f");
     ImGui::SliderFloat("Whitewater size", &whitewaterSettings_.renderScale,
                        0.05f, 0.75f, "%.2fx");
     if (ImGui::Button("Reset whitewater preset")) {
       whitewaterSettings_ = WhitewaterSettings{};
       whitewaterSimulationTime_ = 0.0f;
     }
-    ImGui::Separator();
+    ImGui::PopItemWidth();
+    ImGui::End();
+
+    ImGui::SetNextWindowPos(
+        ImVec2(panelMargin, panelMargin + simulationPanelHeight + panelGap),
+                            ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(panelWidth, panelColumnHeight - simulationPanelHeight),
+                             ImGuiCond_Once);
+    ImGui::SetNextWindowBgAlpha(0.78f);
+    ImGui::Begin("Rendering controls");
+    ImGui::PushItemWidth(100.0f);
     ImGui::TextUnformatted("Screen-space reconstruction");
     ImGui::SliderFloat("Render scale", &fluidSettings_.renderScale, 0.5f, 1.0f,
                        "%.2fx");
@@ -532,11 +523,16 @@ public:
                        &fluidSettings_.shadowAmbientLight, 0.0f, 0.75f, "%.2f");
     ImGui::SliderInt("Shadow update interval",
                      &fluidSettings_.shadowUpdateInterval, 1, 4, "%d frames");
-    ImGui::TextUnformatted("Click and drag outside this panel to orbit.");
+    ImGui::PopItemWidth();
     ImGui::End();
 
-    ImGui::SetNextWindowPos(ImVec2(390.0f, 20.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(330.0f, 0.0f), ImGuiCond_FirstUseEver);
+    const float debugX = std::max(
+        panelMargin, ImGui::GetIO().DisplaySize.x - debugPanelWidth - panelMargin);
+    ImGui::SetNextWindowPos(ImVec2(debugX, panelMargin),
+                            ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(debugPanelWidth, 100.0f),
+                             ImGuiCond_Once);
+    ImGui::SetNextWindowBgAlpha(0.78f);
     ImGui::Begin("Debug visualization");
     constexpr const char *debugModes[] = {
         "Off", "Whitewater", "Particle velocity",
@@ -548,10 +544,14 @@ public:
       ImGui::TextColored(ImVec4(0, 1, 0, 1), "Green: foam");
       ImGui::TextColored(ImVec4(0, 0.45f, 1, 1), "Blue: bubbles");
     } else if (debugMode_ == kDebugFluidVelocity) {
-      ImGui::TextUnformatted("Blue: still   Cyan/Yellow: medium   Red: fast");
+      ImGui::TextColored(ImVec4(1, 0, 0, 1), "Red: fast");
+      ImGui::TextColored(ImVec4(0, 1, 0, 1), "Green: medium");
+      ImGui::TextColored(ImVec4(0, 0.45f, 1, 1), "Blue: still");
     } else if (debugMode_ == kDebugFluidPressure) {
-      ImGui::TextUnformatted(
-          "Blue: negative   White: near zero   Red: positive");
+      ImGui::TextColored(ImVec4(0, 0.45f, 1, 1), "Blue: negative");
+      ImGui::TextColored(ImVec4(1,1,1,1), "White: near zero");
+      ImGui::TextColored(ImVec4(1,0,0,1), "Red: positive");
+
     } else {
       ImGui::TextUnformatted("Normal scene rendering.");
     }
@@ -1500,18 +1500,12 @@ private:
     if (environmentImage_)
       return;
 
-    std::vector<std::string> candidates = {"media/uffizi_probe.hdr",
-                                           "../media/uffizi_probe.hdr",
-                                           "../../media/uffizi_probe.hdr"};
     int width = 0;
     int height = 0;
     int comp = 0;
-    float *pixels = nullptr;
-    for (const auto &path : candidates) {
-      pixels = stbi_loadf(path.c_str(), &width, &height, &comp, 4);
-      if (pixels)
-        break;
-    }
+    float *pixels = stbi_loadf(
+        (std::string(ASSET_DIR) + "/media/uffizi_probe.hdr").c_str(),
+        &width, &height, &comp, 4);
 
     std::vector<float> fallback;
     const float *src = pixels;
