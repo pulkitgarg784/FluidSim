@@ -262,7 +262,7 @@ struct FluidRenderSettings {
   float depthDifferenceStrength = 20.0f;
   int blurIterations = 1;
   float refractionStrength = 0.10f;
-  float absorptionScale = 1.1f;
+  float absorptionScale = 0.7f;
   float extinctionRed = 0.55f;
   float extinctionGreen = 0.15f;
   float extinctionBlue = 0.1f;
@@ -271,6 +271,7 @@ struct FluidRenderSettings {
   float sunElevationDegrees = 53.0f;
   float shadowAmbientLight = 0.17f;
   int shadowUpdateInterval = 2;
+  int simulationSubsteps = 1;
 };
 
 struct WhitewaterSettings {
@@ -452,8 +453,11 @@ public:
                          "%.4f");
       ImGui::SliderFloat("Collision damping", &physics.collisionDamping, 0.0f,
                          1.0f, "%.2f");
+      ImGui::SliderInt("Simulation substeps",
+                       &fluidSettings_.simulationSubsteps, 1, 8);
       if (ImGui::Button("Reset water preset")) {
         physics = defaultSphParams_;
+        fluidSettings_.simulationSubsteps = 1;
       }
     }
     ImGui::Separator();
@@ -610,14 +614,17 @@ public:
       updateFluidDescriptors();
     }
 
+    const int simulationSubsteps =
+        std::max(fluidSettings_.simulationSubsteps, 1);
+    const int simulationSteps = physicsSteps * simulationSubsteps;
     SphParams frameParams = liveSphParams_;
-    frameParams.deltaT = baseDeltaT_;
+    frameParams.deltaT = baseDeltaT_ / static_cast<float>(simulationSubsteps);
     std::memcpy(paramsBuffers_[currentFrame_].mapped, &frameParams,
                 sizeof(frameParams));
     std::memcpy(interactionBuffers_[currentFrame_].mapped, &pendingInteraction_,
                 sizeof(InteractionParams));
     whitewaterSimulationTime_ +=
-        frameParams.deltaT * static_cast<float>(physicsSteps);
+        frameParams.deltaT * static_cast<float>(simulationSteps);
     const float fadeT =
         std::clamp((whitewaterSimulationTime_ - 0.2f) / 0.35f, 0.0f, 1.0f);
     WhitewaterParams whitewater{};
@@ -686,7 +693,7 @@ public:
 
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
     vkResetCommandBuffer(cmd, 0);
-    recordCommandBuffer(cmd, imageIndex, dp, wp, physicsSteps);
+    recordCommandBuffer(cmd, imageIndex, dp, wp, simulationSteps);
     ++renderedFrameCount_;
 
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
