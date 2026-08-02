@@ -127,15 +127,6 @@ struct ThicknessBlurPush {
   float maxScreenSpaceRadius;
 };
 
-struct BlurPush {
-  float dir[2];
-  float depthDifferenceStrength;
-  float maxScreenSpaceRadius;
-  float strength;
-  float particleRadius;
-  float fillSilhouette;
-};
-
 struct WaterPush {
   float4 camRight;
   float4 camUp;
