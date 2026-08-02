@@ -1,15 +1,10 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "particle_push.glsl"
 
 layout(location = 0) in vec2 vUV;
 layout(location = 1) in vec3 vViewCenter;
-
-layout(push_constant) uniform PC {
-    mat4 view;
-    mat4 proj;
-    vec4 camRight;
-    vec4 camUp;
-    vec4 params; // x = radius
-} pc;
 
 layout(location = 0) out float outDepth;
 

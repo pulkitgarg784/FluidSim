@@ -40,10 +40,10 @@ set(SHADER_OUT_DIR ${CMAKE_BINARY_DIR}/shaders)
 file(MAKE_DIRECTORY ${SHADER_OUT_DIR})
 
 set(SHADER_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_depth.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_depth.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_debug.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_debug.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fluid_thickness.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fullscreen.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene_background.frag
@@ -58,7 +58,12 @@ set(SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_start_indices.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_density.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_pressure.comp
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_viscosity_integrate.comp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sph_viscosity_integrate.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/whitewater_update.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/whitewater.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/whitewater.frag)
+
+file(GLOB SHADER_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.glsl)
 
 set(SPIRV_OUTPUTS)
 foreach(SHADER ${SHADER_SOURCES})
@@ -66,16 +71,25 @@ foreach(SHADER ${SHADER_SOURCES})
     set(SPV ${SHADER_OUT_DIR}/${FNAME}.spv)
     add_custom_command(
         OUTPUT ${SPV}
-        COMMAND ${GLSLC} ${SHADER} -o ${SPV}
-        DEPENDS ${SHADER}
+        COMMAND ${GLSLC} -I ${CMAKE_CURRENT_SOURCE_DIR}/shaders ${SHADER} -o ${SPV}
+        DEPENDS ${SHADER} ${SHADER_HEADERS}
         COMMENT "Compiling shader ${FNAME}")
     list(APPEND SPIRV_OUTPUTS ${SPV})
 endforeach()
 
 add_custom_target(shaders DEPENDS ${SPIRV_OUTPUTS})
 
-add_executable(CS488 src/main.cpp src/vk_radix_sort_impl.cpp)
+add_executable(CS488
+    src/main.cpp
+    src/obj_loader.cpp
+    src/vk_radix_sort_impl.cpp)
 add_dependencies(CS488 shaders)
+
+# Keep the demo scenes and HDR environment with the build output so the
+# executable does not depend on its working directory or source checkout.
+add_custom_command(TARGET CS488 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/media ${CMAKE_BINARY_DIR}/media)
 
 target_include_directories(CS488 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -84,6 +98,13 @@ target_include_directories(CS488 PRIVATE
 
 target_compile_definitions(CS488 PRIVATE
     SHADER_DIR="${SHADER_OUT_DIR}"
-    ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    ASSET_DIR="${CMAKE_BINARY_DIR}")
 
 target_link_libraries(CS488 PRIVATE Vulkan::Vulkan imgui)
+
+if(APPLE)
+    get_filename_component(VULKAN_LIBRARY_DIR "${Vulkan_LIBRARY}" DIRECTORY)
+    set_target_properties(CS488 PROPERTIES
+        BUILD_RPATH "${VULKAN_LIBRARY_DIR}"
+        INSTALL_RPATH "${VULKAN_LIBRARY_DIR}")
+endif()

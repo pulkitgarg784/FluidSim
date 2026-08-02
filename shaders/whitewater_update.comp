@@ -1,0 +1,174 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 256) in;
+
+#include "sph_params.glsl"
+#include "whitewater_params.glsl"
+#include "whitewater_shared.glsl"
+
+layout(std430, binding = 8) readonly buffer StartIndices { uint startIndices[]; };
+layout(std430, binding = 10) readonly buffer SortedVel { vec4 sortedVel[]; };
+layout(std430, binding = 11) readonly buffer SortedPred { vec4 sortedPred[]; };
+layout(std430, binding = 13) readonly buffer EndIndices { uint endIndices[]; };
+layout(std430, binding = 15) buffer WhiteParticles {
+  WhiteParticle whiteParticles[];
+};
+layout(std430, binding = 16) buffer WhitewaterAllocator {
+  uint spawnCursor;
+  uint activeCount;
+  uint slotStates[];
+};
+
+void retire(uint slot, WhiteParticle particle) {
+  particle.positionLife.w = 0.0;
+  whiteParticles[slot] = particle;
+  if (atomicExchange(slotStates[slot], 0u) != 0u)
+    atomicAdd(activeCount, 0xffffffffu);
+}
+
+struct FluidSample {
+  uint count;
+  vec3 velocity;
+  vec3 offsetSum;
+  float weightSum;
+};
+
+FluidSample sampleFluid(vec3 position, vec3 fallbackVelocity) {
+  FluidSample result;
+  result.count = 0u;
+  result.velocity = fallbackVelocity;
+  result.offsetSum = vec3(0.0);
+  result.weightSum = 0.0;
+
+  float h = P.smoothingRadius;
+  float h2 = h * h;
+  vec3 velocitySum = vec3(0.0);
+
+  uint limit = max(W.bubbleMinNeighbours, 1u);
+
+  ivec3 center = gridCell(position);
+  int centerKey = int(cellKey(center));
+  ivec3 lo = neighbourMin(center);
+  ivec3 hi = neighbourMax(center);
+
+  for (int dz = lo.z; dz <= hi.z && result.count < limit; ++dz)
+  for (int dy = lo.y; dy <= hi.y && result.count < limit; ++dy)
+  for (int dx = lo.x; dx <= hi.x && result.count < limit; ++dx) {
+    uint key = neighbourKey(centerKey, ivec3(dx, dy, dz));
+    uint start = startIndices[key];
+    if (start == EMPTY_CELL) continue;
+    uint end = endIndices[key];
+    for (uint e = start; e < end && result.count < limit; ++e) {
+      vec3 offset = sortedPred[e].xyz - position;
+      float dst2 = dot(offset, offset);
+      if (dst2 >= h2) continue;
+      float q = 1.0 - sqrt(dst2) / h;
+      float weight = q * q;
+      velocitySum += sortedVel[e].xyz * weight;
+      result.offsetSum += offset * weight;
+      result.weightSum += weight;
+      ++result.count;
+    }
+  }
+
+  if (result.weightSum > P.epsilon)
+    result.velocity = velocitySum / result.weightSum;
+  return result;
+}
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  if (index >= W.capacity)
+    return;
+
+  if (W.enabled == 0u) {
+    retire(index, whiteParticles[index]);
+    return;
+  }
+  if (slotStates[index] == 0u)
+    return;
+
+  WhiteParticle particle = whiteParticles[index];
+  particle.positionLife.w -= P.deltaT;
+  if (particle.positionLife.w <= 0.0) {
+    retire(index, particle);
+    return;
+  }
+
+  vec3 position = particle.positionLife.xyz;
+  vec3 velocity = particle.velocityScale.xyz;
+  float h = P.smoothingRadius;
+  vec3 halfBounds = 0.5 * P.boundsSize.xyz;
+
+  FluidSample fluid = sampleFluid(position, velocity);
+  WallContact wall = wallContact(position);
+  uint wallAdjustedCount = fluid.count + wallNeighbours(wall, fluid.count);
+  float type = classify(wallAdjustedCount, fluid.count);
+  bool spray = type == SPRAY;
+  bool bubble = type == BUBBLE;
+  bool foam = type == FOAM;
+
+  if (foam && position.y < 0.0 && position.y + halfBounds.y < h) {
+    retire(index, particle);
+    return;
+  }
+
+  if (spray) {
+    float speed = length(velocity);
+    vec3 drag = speed > P.epsilon ? -velocity * speed * W.sprayDrag : vec3(0.0);
+    velocity += (P.gravity.xyz + drag) * P.deltaT;
+  } else if (bubble) {
+    vec3 buoyancy = P.gravity.xyz * (1.0 - W.bubbleBuoyancy);
+    vec3 follow = (fluid.velocity - velocity) * W.fluidFollow;
+    velocity += (buoyancy + follow) * P.deltaT;
+  } else {
+    velocity = fluid.velocity;
+  }
+  position += velocity * P.deltaT;
+
+  // prevent foam from sinking
+  if (foam && dot(fluid.offsetSum, fluid.offsetSum) > P.epsilon * P.epsilon) {
+    vec3 outward = maskWallDirections(-normalize(fluid.offsetSum), wall);
+    float submergence = max(float(wallAdjustedCount) -
+                               float(W.sprayMaxNeighbours + 1u), 0.0) /
+                        neighbourBand();
+    if (dot(outward, outward) > P.epsilon * P.epsilon)
+      position +=
+          normalize(outward) * (h * 0.12 * clamp(submergence, 0.0, 1.0));
+  }
+
+  for (int axis = 0; axis < 3; ++axis) {
+    float limit = max(halfBounds[axis] - 0.05 * h, P.epsilon);
+    if (abs(position[axis]) <= limit)
+      continue;
+
+    float wallSign = position[axis] < 0.0 ? -1.0 : 1.0;
+    float approach = velocity[axis];
+    float penetration = abs(position[axis]) - limit;
+    position[axis] = clamp(wallSign * (limit - penetration), -limit, limit);
+
+    // retire spray that has hit bottom
+    if (spray && axis == 1 && wallSign < 0.0 && fluid.count == 0u) {
+      retire(index, particle);
+      return;
+    }
+
+    bool sideWall = axis != 1;
+    float restitution = 0.1;
+    if (spray && sideWall) {
+      velocity *= 0.30; // spray splatters
+      restitution = 0.15;
+    } else if (bubble && sideWall) {
+      restitution = 0.05;
+    }
+    if (approach * wallSign > 0.0)
+      velocity[axis] = -approach * restitution;
+  }
+
+  float scale = mix(particleScale(particle), bubble ? W.bubbleScale : 1.0,
+                    clamp(P.deltaT * 7.0, 0.0, 1.0));
+  particle.positionLife.xyz = position;
+  particle.velocityScale = vec4(velocity, scale + 2.0 * type);
+  whiteParticles[index] = particle;
+}

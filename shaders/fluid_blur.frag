@@ -1,4 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "screen.glsl"
 
 layout(location = 0) in vec2 vUV;
 layout(binding = 0) uniform sampler2D src;
@@ -10,54 +13,54 @@ layout(push_constant) uniform PC {
     float strength;
     float particleRadius;
     float fillSilhouette;
+    float tanHalfFov;
 } pc;
 
 layout(location = 0) out float outDepth;
 
-const float EMPTY = 1.0e4;
-const float TAN_HALF_FOV = 0.41421356237;
-
+// Bilateral blur along one axis
 void main() {
-    float centerD = texture(src, vUV).r;
-    if (centerD >= EMPTY * 0.5 && pc.fillSilhouette > 0.5) {
+    vec2 step = pc.dir / vec2(textureSize(src, 0));
+    float center = texture(src, vUV).r;
+
+    if (!hasSurface(center) && pc.fillSilhouette > 0.5) {
         for (int distance = 1; distance <= 2; ++distance) {
-            float negativeD = texture(src, vUV - pc.dir * float(distance)).r;
-            float positiveD = texture(src, vUV + pc.dir * float(distance)).r;
-            bool negativeValid = negativeD < EMPTY * 0.5;
-            bool positiveValid = positiveD < EMPTY * 0.5;
-            if (negativeValid || positiveValid) {
-                centerD = negativeValid && positiveValid
-                              ? min(negativeD, positiveD)
-                              : (negativeValid ? negativeD : positiveD);
+            float back = texture(src, vUV - step * float(distance)).r;
+            float front = texture(src, vUV + step * float(distance)).r;
+            if (hasSurface(back) || hasSurface(front)) {
+                center = min(hasSurface(back) ? back : NO_SURFACE_DEPTH,
+                             hasSurface(front) ? front : NO_SURFACE_DEPTH);
                 break;
             }
         }
     }
-    if (centerD >= EMPTY * 0.5) {
-        outDepth = EMPTY;
+    if (!hasSurface(center)) {
+        outDepth = NO_SURFACE_DEPTH;
         return;
     }
 
-    float sum = 0.0;
-    float wsum = 0.0;
-    float focalLengthPixels = 0.5 * float(textureSize(src, 0).y) / TAN_HALF_FOV;
-    float projectedRadius = pc.particleRadius * focalLengthPixels /
-                            max(centerD, 1.0e-4);
-    float radius = clamp(projectedRadius, 1.0, pc.maxScreenSpaceRadius);
-    int R = int(ceil(radius));
+    // Use world space size for blur
+    float focalLengthPixels =
+        0.5 * float(textureSize(src, 0).y) / pc.tanHalfFov;
+    float projected =
+        pc.particleRadius * focalLengthPixels / max(center, 1.0e-4);
+    float radius = clamp(projected, 1.0, pc.maxScreenSpaceRadius);
     float sigma = max(radius * pc.strength * 0.5, 0.5);
-    float twoSigma2 = 2.0 * sigma * sigma;
-    for (int i = -R; i <= R; i++) {
-        vec2 uv = vUV + pc.dir * float(i);
-        float d = texture(src, uv).r;
-        if (d >= EMPTY * 0.5)
-            continue; // no water
-        float wSpatial = exp(-float(i * i) / twoSigma2);
-        float dd = d - centerD;
-        float wDepth = exp(-(dd * dd) * pc.depthDifferenceStrength);
-        float w = wSpatial * wDepth;
-        sum += d * w;
-        wsum += w;
+    float twoSigmaSquared = 2.0 * sigma * sigma;
+
+    float sum = 0.0;
+    float weights = 0.0;
+    int taps = int(ceil(radius));
+    for (int i = -taps; i <= taps; ++i) {
+        float depth = texture(src, vUV + step * float(i)).r;
+        if (!hasSurface(depth))
+            continue;
+        float difference = depth - center;
+        float weight =
+            exp(-float(i * i) / twoSigmaSquared) *
+            exp(-difference * difference * pc.depthDifferenceStrength);
+        sum += depth * weight;
+        weights += weight;
     }
-    outDepth = (wsum > 0.0) ? sum / wsum : centerD;
+    outDepth = weights > 0.0 ? sum / weights : center;
 }

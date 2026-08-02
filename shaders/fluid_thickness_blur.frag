@@ -5,29 +5,30 @@ layout(binding = 0) uniform sampler2D src;
 
 layout(push_constant) uniform PC {
     vec2 dir;
-    float depthDifferenceStrength;
     float maxScreenSpaceRadius;
-    float strength;
 } pc;
 
 layout(location = 0) out float outThickness;
 
+// Gaussian blur thcikness
 void main() {
     float center = texture(src, vUV).r;
     if (center <= 1.0e-6) {
         outThickness = 0.0;
         return;
     }
-    ivec2 size = textureSize(src, 0);
-    vec2 texel = 1.0 / vec2(size);
+
+    vec2 step = pc.dir / vec2(textureSize(src, 0));
     int radius = clamp(int(round(pc.maxScreenSpaceRadius * 0.35)), 1, 5);
     float sigma = max(float(radius) * 0.65, 0.75);
+    float twoSigmaSquared = 2.0 * sigma * sigma;
+
     float sum = 0.0;
     float weights = 0.0;
     for (int i = -radius; i <= radius; ++i) {
-        float w = exp(-float(i * i) / (2.0 * sigma * sigma));
-        sum += texture(src, vUV + pc.dir * float(i) * texel).r * w;
-        weights += w;
+        float weight = exp(-float(i * i) / twoSigmaSquared);
+        sum += texture(src, vUV + step * float(i)).r * weight;
+        weights += weight;
     }
     outThickness = sum / weights;
 }
