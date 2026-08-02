@@ -267,7 +267,7 @@ struct FluidRenderSettings {
   float extinctionGreen = 0.15f;
   float extinctionBlue = 0.1f;
   float baseReflectance = 0.02f;
-  float sunAzimuthDegrees = 36.0f;
+  float sunAngleDegrees = 36.0f;
   float sunElevationDegrees = 53.0f;
   float shadowAmbientLight = 0.17f;
   int shadowUpdateInterval = 2;
@@ -515,7 +515,7 @@ public:
                        0.0f, 0.15f, "%.3f");
     ImGui::Separator();
     ImGui::TextUnformatted("Sun / shadows");
-    ImGui::SliderFloat("Sun azimuth", &fluidSettings_.sunAzimuthDegrees,
+    ImGui::SliderFloat("Sun angle", &fluidSettings_.sunAngleDegrees,
                        -180.0f, 180.0f, "%.0f deg");
     ImGui::SliderFloat("Sun elevation", &fluidSettings_.sunElevationDegrees,
                        10.0f, 85.0f, "%.0f deg");
@@ -929,7 +929,7 @@ private:
   float activeRenderScale_ = 0.0f;
   uint64_t renderedFrameCount_ = 0;
   bool waterShadowValid_ = false;
-  float shadowSunAzimuth_ = 1.0e9f;
+  float shadowSunAngle_ = 1.0e9f;
   float shadowSunElevation_ = 1.0e9f;
   VkFormat sceneColorFormat_ = VK_FORMAT_UNDEFINED;
   VkFormat sceneDepthFormat_ = VK_FORMAT_R32_SFLOAT;
@@ -2852,13 +2852,13 @@ private:
     colorToSampledBarrier(cmd, whitewaterDepthImage_);
 
     // Render water thickness from the lights view.
-    const float azimuth =
-        fluidSettings_.sunAzimuthDegrees * kDegreesToRadians;
+    const float sunAngle =
+        fluidSettings_.sunAngleDegrees * kDegreesToRadians;
     const float elevation =
         fluidSettings_.sunElevationDegrees * kDegreesToRadians;
     const float3 sunDir = normalize(
-        float3(std::cos(elevation) * std::cos(azimuth), std::sin(elevation),
-               std::cos(elevation) * std::sin(azimuth)));
+        float3(std::cos(elevation) * std::cos(sunAngle), std::sin(elevation),
+               std::cos(elevation) * std::sin(sunAngle)));
     const float3 lightForward = -sunDir;
     const float3 lightRight = normalize(cross(lightForward, float3(0, 1, 0)));
     const float3 lightUp = cross(lightRight, lightForward);
@@ -2899,7 +2899,7 @@ private:
     const int shadowInterval = std::max(fluidSettings_.shadowUpdateInterval, 1);
     const bool updateWaterShadow =
         !waterShadowValid_ || (renderedFrameCount_ % shadowInterval == 0) ||
-        std::abs(fluidSettings_.sunAzimuthDegrees - shadowSunAzimuth_) >
+        std::abs(fluidSettings_.sunAngleDegrees - shadowSunAngle_) >
             0.01f ||
         std::abs(fluidSettings_.sunElevationDegrees - shadowSunElevation_) >
             0.01f;
@@ -2963,7 +2963,7 @@ private:
       vkCmdEndRenderPass(cmd);
       colorToSampledBarrier(cmd, waterShadowImage_);
       waterShadowValid_ = true;
-      shadowSunAzimuth_ = fluidSettings_.sunAzimuthDegrees;
+      shadowSunAngle_ = fluidSettings_.sunAngleDegrees;
       shadowSunElevation_ = fluidSettings_.sunElevationDegrees;
     }
 
