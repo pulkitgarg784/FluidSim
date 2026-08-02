@@ -1,100 +1,148 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 256) in;
 
+#include "sph_params.glsl"
+#include "whitewater_params.glsl"
+#include "whitewater_shared.glsl"
+
 layout(std430, binding = 3) readonly buffer Densities { vec2 densities[]; };
-layout(std140, binding = 5) uniform Params {
-  vec4 gravity;
-  vec4 boundsSize;
-  float deltaT;
-  float smoothingRadius;
-  float particleMass;
-  float targetDensity;
-  float pressureMultiplier;
-  float viscosityStrength;
-  float collisionDamping;
-  float densityKernelScale;
-  float pressureGradientKernelScale;
-  float viscosityKernelScale;
-  uint numParticles;
-  float epsilon;
-  uvec4 grid;
-} P;
 layout(std430, binding = 8) readonly buffer StartIndices { uint startIndices[]; };
-layout(std430, binding = 13) readonly buffer EndIndices { uint endIndices[]; };
 layout(std430, binding = 10) buffer SortedVel { vec4 sortedVel[]; };
 layout(std430, binding = 11) readonly buffer SortedPred { vec4 sortedPred[]; };
-layout(std140, binding = 14) uniform WhitewaterParams {
-  float generationRate;
-  float trappedAirMin;
-  float trappedAirMax;
-  float kineticEnergyMin;
-  float kineticEnergyMax;
-  float bubbleBuoyancy;
-  float sprayDrag;
-  float fluidFollow;
-  float lifetimeMin;
-  float lifetimeMax;
-  float bubbleScale;
-  float renderScale;
-  uint capacity;
-  uint sprayMaxNeighbours;
-  uint bubbleMinNeighbours;
-  uint enabled;
-  uint debugClassification;
-  uint activeCount;
-} W;
-struct WhiteParticle {
-  vec4 positionLife;
-  vec4 velocityScale;
-};
+layout(std430, binding = 13) readonly buffer EndIndices { uint endIndices[]; };
 layout(std430, binding = 15) buffer WhiteParticles {
   WhiteParticle whiteParticles[];
 };
 layout(std430, binding = 16) buffer WhitewaterAllocator {
-  uint whitewaterSpawnCursor;
-  uint whitewaterActiveCount;
-  uint whitewaterSlotStates[];
+  uint spawnCursor;
+  uint activeCount;
+  uint slotStates[];
 };
 
-ivec3 gridCell(vec3 p) {
-  ivec3 c = ivec3(floor((p + 0.5 * P.boundsSize.xyz) / P.smoothingRadius)) + ivec3(1);
-  return clamp(c, ivec3(0), ivec3(P.grid.xyz) - ivec3(1));
+float pressureFromDensity(float density) {
+  return (density - P.targetDensity) * P.pressureMultiplier;
 }
-uint cellKey(ivec3 c) {
-  return (uint(c.z) * P.grid.y + uint(c.y)) * P.grid.x + uint(c.x);
+
+float nearPressureFromDensity(float density) {
+  return density * P.gravity.w;
 }
-float pressureFromDensity(float d) {
-  return (d - P.targetDensity) * P.pressureMultiplier;
-}
-float nearPressureFromDensity(float d) {
-  return d * P.gravity.w;
-}
-vec3 randomDir(uint seed) {
-  seed = seed * 747796405u + 2891336453u;
-  uint w = ((seed >> ((seed >> 28) + 4u)) ^ seed) * 277803737u;
-  w = (w >> 22) ^ w;
-  float z = float(w & 0xffffu) * (2.0 / 65535.0) - 1.0;
-  float a = float((w >> 16) & 0xffffu) * (6.28318530718 / 65535.0);
-  float r = sqrt(max(0.0, 1.0 - z * z));
-  return vec3(r * cos(a), r * sin(a), z);
-}
+
 uint nextRandom(inout uint state) {
   state = state * 747796405u + 2891336453u;
   uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
   return (word >> 22u) ^ word;
 }
+
 float random01(inout uint state) {
   return float(nextRandom(state)) * (1.0 / 4294967295.0);
 }
-float remap01(float value, float minValue, float maxValue) {
-  return clamp((value - minValue) / max(maxValue - minValue, P.epsilon),
-               0.0, 1.0);
+
+vec3 randomDirection(uint state) {
+  uint word = nextRandom(state);
+  float z = float(word & 0xffffu) * (2.0 / 65535.0) - 1.0;
+  float angle = float((word >> 16) & 0xffffu) * (TWO_PI / 65535.0);
+  float r = sqrt(max(0.0, 1.0 - z * z));
+  return vec3(r * cos(angle), r * sin(angle), z);
 }
-vec3 orthonormal(vec3 direction) {
-  vec3 axis = abs(direction.y) < 0.9 ? vec3(0.0, 1.0, 0.0)
-                                     : vec3(1.0, 0.0, 0.0);
+
+float remap01(float value, float minValue, float maxValue) {
+  return clamp((value - minValue) / max(maxValue - minValue, P.epsilon), 0.0,
+               1.0);
+}
+
+vec3 perpendicular(vec3 direction) {
+  vec3 axis =
+      abs(direction.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
   return normalize(cross(direction, axis));
+}
+
+struct Neighbourhood {
+  uint count;
+  float convergence; // relative speed
+  vec3 offsetSum;    // direction to the neighbours
+  float weightSum;
+};
+
+// Secondary particles depend on air trapped between converging surfaces, fast
+// downward motion into the water below, and crests thrown clear of the
+// surface.
+void spawnWhitewater(uint idx, vec3 pi, vec3 vi, vec3 velocity,
+                     Neighbourhood neighbours) {
+  float h = P.smoothingRadius;
+  vec3 halfBounds = 0.5 * P.boundsSize.xyz;
+  WallContact wall = wallContact(pi);
+  uint wallAdjustedCount =
+      neighbours.count + wallNeighbours(wall, neighbours.count);
+
+  float trappedAir =
+      remap01(neighbours.convergence, W.trappedAirMin, W.trappedAirMax);
+  float kinetic = remap01(dot(vi, vi), W.kineticEnergyMin, W.kineticEnergyMax);
+  float impactKinetic = remap01(dot(vi, vi), 3.0, 15.0);
+
+  float floorClearance = pi.y + halfBounds.y - 0.5 * h;
+  float downwardImpact = remap01(-vi.y, 1.0, 3.5) *
+                         remap01(neighbours.convergence, 5.0, 15.0) *
+                         clamp(floorClearance / h, 0.0, 1.0);
+
+  float waveCrest = 0.0;
+  float speed = length(vi);
+  if (neighbours.weightSum > P.epsilon && speed > P.epsilon &&
+      wallAdjustedCount < W.bubbleMinNeighbours) {
+    vec3 outward = maskWallDirections(-normalize(neighbours.offsetSum), wall);
+    if (dot(outward, outward) > P.epsilon * P.epsilon) {
+      outward = normalize(outward);
+      float surfaceExposure =
+          1.0 - clamp((float(wallAdjustedCount) - float(W.sprayMaxNeighbours)) /
+                          neighbourBand(),
+                      0.0, 1.0);
+      float surfaceAsymmetry =
+          clamp(length(neighbours.offsetSum) / (h * neighbours.weightSum),
+                0.0, 1.0);
+      waveCrest = surfaceExposure * surfaceAsymmetry *
+                  remap01(dot(vi / speed, outward), 0.6, 1.0) *
+                  remap01(max(dot(vi, outward), 0.0), 0.5, 2.5);
+    }
+  }
+
+  float potential = trappedAir * kinetic +
+                    0.50 * downwardImpact * impactKinetic +
+                    0.35 * waveCrest * impactKinetic;
+  potential *= wall.clearance;
+
+  uint rng = idx * 9781u + floatBitsToUint(pi.x) * 6271u +
+             floatBitsToUint(pi.y) * 13007u + floatBitsToUint(pi.z) * 421u;
+  float expected = W.generationRate * potential * P.deltaT;
+  uint spawnCount = uint(floor(expected));
+  if (random01(rng) < fract(expected))
+    ++spawnCount;
+  spawnCount = min(spawnCount, 4u);
+  if (spawnCount == 0u)
+    return;
+
+  uint base = atomicAdd(spawnCursor, spawnCount);
+  vec3 forward =
+      length(velocity) > P.epsilon ? normalize(velocity) : vec3(0.0, 1.0, 0.0);
+  vec3 axisA = perpendicular(forward);
+  vec3 axisB = normalize(cross(forward, axisA));
+  float type = classify(wallAdjustedCount, neighbours.count);
+
+  for (uint s = 0u; s < spawnCount; ++s) {
+    float angle = random01(rng) * TWO_PI;
+    float radius = sqrt(random01(rng)) * h;
+    vec3 radial = radius * (cos(angle) * axisA + sin(angle) * axisB);
+    vec3 position = pi + radial + velocity * (P.deltaT * random01(rng));
+    float life = mix(W.lifetimeMin, W.lifetimeMax, random01(rng));
+
+    uint slot = (base + s) % W.capacity;
+    if (atomicCompSwap(slotStates[slot], 0u, 1u) != 0u)
+      continue;
+    atomicAdd(activeCount, 1u);
+    whiteParticles[slot].positionLife = vec4(position, life);
+    whiteParticles[slot].velocityScale =
+        vec4(velocity + radial, 0.5 * (1.0 + W.bubbleScale) + 2.0 * type);
+  }
 }
 
 void main() {
@@ -104,195 +152,75 @@ void main() {
   vec3 pi = sortedPred[idx].xyz;
   vec3 vi = sortedVel[idx].xyz;
   vec2 densityI = max(densities[idx], vec2(P.epsilon));
-  float di = densityI.x;
-  float pressureI = pressureFromDensity(di);
+  float pressureI = pressureFromDensity(densityI.x);
   float nearPressureI = nearPressureFromDensity(densityI.y);
   float h = P.smoothingRadius;
   float h2 = h * h;
   float nearGradientScale = 6.0 * P.densityKernelScale / h;
-  ivec3 center = gridCell(pi);
-  int rowStride = int(P.grid.x);
-  int sliceStride = rowStride * int(P.grid.y);
-  int centerKey = int(cellKey(center));
-  int x0 = max(-1, -center.x);
-  int y0 = max(-1, -center.y);
-  int z0 = max(-1, -center.z);
-  int x1 = min(1, int(P.grid.x) - 1 - center.x);
-  int y1 = min(1, int(P.grid.y) - 1 - center.y);
-  int z1 = min(1, int(P.grid.z) - 1 - center.z);
+
   vec3 force = vec3(0.0);
-  uint neighbourCount = 0u;
+  Neighbourhood neighbours;
+  neighbours.count = 0u;
+  neighbours.convergence = 0.0;
+  neighbours.offsetSum = vec3(0.0);
+  neighbours.weightSum = 0.0;
+
   bool canSpawn =
       W.enabled != 0u && W.capacity != 0u && W.activeCount < W.capacity;
-  float weightedVelocityDifference = 0.0;
-  vec3 weightedNeighbourOffset = vec3(0.0);
-  float surfaceWeightSum = 0.0;
 
-  for (int dz = z0; dz <= z1; ++dz)
-  for (int dy = y0; dy <= y1; ++dy)
-  for (int dx = x0; dx <= x1; ++dx) {
-    uint key = uint(centerKey + dz * sliceStride + dy * rowStride + dx);
+  ivec3 center = gridCell(pi);
+  int centerKey = int(cellKey(center));
+  ivec3 lo = neighbourMin(center);
+  ivec3 hi = neighbourMax(center);
+
+  for (int dz = lo.z; dz <= hi.z; ++dz)
+  for (int dy = lo.y; dy <= hi.y; ++dy)
+  for (int dx = lo.x; dx <= hi.x; ++dx) {
+    uint key = neighbourKey(centerKey, ivec3(dx, dy, dz));
     uint start = startIndices[key];
-    if (start == 0xffffffffu) continue;
+    if (start == EMPTY_CELL) continue;
     uint end = endIndices[key];
     for (uint e = start; e < end; ++e) {
       if (e == idx) continue;
       vec3 offset = sortedPred[e].xyz - pi;
       float dst2 = dot(offset, offset);
       if (dst2 >= h2) continue;
-      ++neighbourCount;
+      ++neighbours.count;
       float dst = sqrt(dst2);
-      vec3 dir = (dst < P.epsilon) ? randomDir(idx * P.numParticles + e)
+      // Coincident particles have no gradient to follow, so pick a direction.
+      vec3 dir = (dst < P.epsilon) ? randomDirection(idx * P.numParticles + e)
                                    : offset / dst;
+
       if (canSpawn) {
         vec3 relativeVelocity = vi - sortedVel[e].xyz;
         float relativeSpeed = length(relativeVelocity);
-        vec3 relativeDirection =
-            relativeVelocity / max(relativeSpeed, P.epsilon);
-        float convergence = 1.0 - dot(relativeDirection, -dir);
+        float headOn =
+            1.0 - dot(relativeVelocity / max(relativeSpeed, P.epsilon), -dir);
         float influence = 1.0 - dst / h;
-        weightedVelocityDifference +=
-            relativeSpeed * convergence * influence;
-        weightedNeighbourOffset += offset * influence;
-        surfaceWeightSum += influence;
+        neighbours.convergence += relativeSpeed * headOn * influence;
+        neighbours.offsetSum += offset * influence;
+        neighbours.weightSum += influence;
       }
+
       vec2 densityJ = max(densities[e], vec2(P.epsilon));
-      float dj = densityJ.x;
-      float sharedPressure = 0.5 * (pressureFromDensity(dj) + pressureI);
+      float sharedPressure =
+          0.5 * (pressureFromDensity(densityJ.x) + pressureI);
       float sharedNearPressure =
           0.5 * (nearPressureFromDensity(densityJ.y) + nearPressureI);
       float v = h - dst;
-      float densitySlope = -v * P.pressureGradientKernelScale;
-      float nearDensitySlope = -v * v * nearGradientScale;
-      force += sharedPressure * dir * densitySlope * P.particleMass / dj;
-      force += sharedNearPressure * dir * nearDensitySlope * P.particleMass /
-               densityJ.y;
+      force += sharedPressure * dir * (-v * P.pressureGradientKernelScale) *
+               P.particleMass / densityJ.x;
+      force += sharedNearPressure * dir * (-v * v * nearGradientScale) *
+               P.particleMass / densityJ.y;
     }
   }
 
-  vec3 velocity = vi + (force / di) * P.deltaT;
+  vec3 velocity = vi + (force / densityI.x) * P.deltaT;
   // airborn drag
-  if (neighbourCount < 8u)
+  if (neighbours.count < 8u)
     velocity -= velocity * (0.75 * P.deltaT);
   sortedVel[idx] = vec4(velocity, 0.0);
 
-  if (canSpawn) {
-    vec3 halfBounds = 0.5 * P.boundsSize.xyz;
-    vec3 wallInward = vec3(0.0);
-    float wallProximitySum = 0.0;
-    float solidBoundarySpawnMask = 1.0;
-    for (int axis = 0; axis < 3; ++axis) {
-      if (axis == 1 && pi.y >= 0.0)
-        continue;
-      float wallDistance = halfBounds[axis] - abs(pi[axis]);
-      float proximity = 1.0 - clamp(wallDistance / h, 0.0, 1.0);
-      float clearanceFromCollisionPlane =
-          wallDistance - 0.5 * h;
-      solidBoundarySpawnMask =
-          min(solidBoundarySpawnMask,
-              clamp(clearanceFromCollisionPlane / h, 0.0, 1.0));
-      if (proximity > 0.0) {
-        wallInward[axis] = -sign(pi[axis]) * proximity;
-        wallProximitySum += proximity;
-      }
-    }
-    uint wallNeighbourSupport =
-        neighbourCount > 0u
-            ? uint(round(min(10.0 * wallProximitySum, 16.0)))
-            : 0u;
-    uint classificationNeighbourCount =
-        neighbourCount + wallNeighbourSupport;
-
-    float trappedAir =
-        remap01(weightedVelocityDifference, W.trappedAirMin, W.trappedAirMax);
-    float kinetic =
-        remap01(dot(vi, vi), W.kineticEnergyMin, W.kineticEnergyMax);
-    float impactKinetic = remap01(dot(vi, vi), 3.0, 15.0);
-    float floorClearance =
-        pi.y + halfBounds.y - 0.5 * h;
-    float floorImpactMask = clamp(floorClearance / h, 0.0, 1.0);
-    float downwardImpact =
-        remap01(-vi.y, 1.0, 3.5) *
-        remap01(weightedVelocityDifference, 5.0, 15.0) *
-        floorImpactMask;
-
-    float waveCrest = 0.0;
-    float speed = length(vi);
-    if (surfaceWeightSum > P.epsilon && speed > P.epsilon &&
-        classificationNeighbourCount < W.bubbleMinNeighbours) {
-      vec3 outwardNormal = -normalize(weightedNeighbourOffset);
-      for (int axis = 0; axis < 3; ++axis) {
-        if (wallInward[axis] != 0.0 &&
-            outwardNormal[axis] * wallInward[axis] < 0.0)
-          outwardNormal[axis] = 0.0;
-      }
-      if (dot(outwardNormal, outwardNormal) >
-          P.epsilon * P.epsilon) {
-        outwardNormal = normalize(outwardNormal);
-        float normalAlignment = dot(vi / speed, outwardNormal);
-        float outwardSpeed = max(dot(vi, outwardNormal), 0.0);
-        float neighbourBand =
-            max(float(W.bubbleMinNeighbours - W.sprayMaxNeighbours), 1.0);
-        float surfaceExposure =
-            1.0 - clamp((float(classificationNeighbourCount) -
-                         float(W.sprayMaxNeighbours)) /
-                            neighbourBand,
-                        0.0, 1.0);
-        float surfaceAsymmetry =
-            clamp(length(weightedNeighbourOffset) /
-                      (h * surfaceWeightSum),
-                  0.0, 1.0);
-        waveCrest = surfaceExposure * surfaceAsymmetry *
-                    remap01(normalAlignment, 0.6, 1.0) *
-                    remap01(outwardSpeed, 0.5, 2.5);
-      }
-    }
-
-    float generationPotential =
-        trappedAir * kinetic +
-        0.50 * downwardImpact * impactKinetic +
-        0.35 * waveCrest * impactKinetic;
-    generationPotential *= solidBoundarySpawnMask;
-    float expected = W.generationRate * generationPotential * P.deltaT;
-    uint rng = idx * 9781u + floatBitsToUint(pi.x) * 6271u +
-               floatBitsToUint(pi.y) * 13007u +
-               floatBitsToUint(pi.z) * 421u;
-    uint spawnCount = uint(floor(expected));
-    if (random01(rng) < fract(expected))
-      ++spawnCount;
-    spawnCount = min(spawnCount, 4u);
-
-    if (spawnCount > 0u) {
-      uint base = atomicAdd(whitewaterSpawnCursor, spawnCount);
-      vec3 direction = length(velocity) > P.epsilon
-                           ? normalize(velocity)
-                           : vec3(0.0, 1.0, 0.0);
-      vec3 axisA = orthonormal(direction);
-      vec3 axisB = normalize(cross(direction, axisA));
-      for (uint s = 0u; s < spawnCount; ++s) {
-        float angle = random01(rng) * 6.28318530718;
-        float radius = sqrt(random01(rng)) * h;
-        vec3 radial = radius * (cos(angle) * axisA + sin(angle) * axisB);
-        vec3 spawnPosition =
-            pi + radial + velocity * (P.deltaT * random01(rng));
-        float life =
-            mix(W.lifetimeMin, W.lifetimeMax, random01(rng));
-        uint slot = (base + s) % W.capacity;
-        if (atomicCompSwap(whitewaterSlotStates[slot], 0u, 1u) != 0u)
-          continue;
-        atomicAdd(whitewaterActiveCount, 1u);
-        uint initialType =
-            classificationNeighbourCount <= W.sprayMaxNeighbours
-                ? 0u
-                : (neighbourCount >= W.bubbleMinNeighbours
-                       ? 2u
-                       : 1u);
-        float initialScale = 0.5 * (1.0 + W.bubbleScale);
-        whiteParticles[slot].positionLife = vec4(spawnPosition, life);
-        whiteParticles[slot].velocityScale =
-            vec4(velocity + radial,
-                 initialScale + 2.0 * float(initialType));
-      }
-    }
-  }
+  if (canSpawn)
+    spawnWhitewater(idx, pi, vi, velocity, neighbours);
 }

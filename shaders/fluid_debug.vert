@@ -1,64 +1,29 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "particle_push.glsl"
+#include "sph_params.glsl"
 
 layout(location = 0) in vec2 inCorner;
 
-layout(std430, binding = 3) readonly buffer Densities {
-  vec2 densities[];
-};
-layout(std140, binding = 5) uniform Params {
-  vec4 gravity;
-  vec4 boundsSize;
-  float deltaT;
-  float smoothingRadius;
-  float particleMass;
-  float targetDensity;
-  float pressureMultiplier;
-  float viscosityStrength;
-  float collisionDamping;
-  float densityKernelScale;
-  float pressureGradientKernelScale;
-  float viscosityKernelScale;
-  uint numParticles;
-  float epsilon;
-  uvec4 grid;
-} P;
-layout(std430, binding = 0) readonly buffer Positions {
-  vec4 positions[];
-};
-layout(std430, binding = 1) readonly buffer Velocities {
-  vec4 velocities[];
-};
-
-layout(push_constant) uniform PC {
-  mat4 view;
-  mat4 proj;
-  vec4 camRight;
-  vec4 camUp;
-  int debugMode;
-} pc;
+layout(std430, binding = 0) readonly buffer Positions { vec4 positions[]; };
+layout(std430, binding = 1) readonly buffer Velocities { vec4 velocities[]; };
+layout(std430, binding = 3) readonly buffer Densities { vec2 densities[]; };
 
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out vec3 vViewCenter;
 layout(location = 2) flat out float vValue;
-layout(location = 3) flat out float vRadius;
-
-const float DEBUG_PARTICLE_RADIUS_SCALE = 0.2833333333;
 
 void main() {
   uint index = gl_InstanceIndex;
   vec3 center = positions[index].xyz;
-  float radius = P.smoothingRadius * DEBUG_PARTICLE_RADIUS_SCALE;
-  vec3 world =
-      center +
-      (inCorner.x * pc.camRight.xyz + inCorner.y * pc.camUp.xyz) * radius;
-  vec4 viewPos = pc.view * vec4(world, 1.0);
-  gl_Position = pc.proj * viewPos;
+  vec3 world = billboardPosition(center, inCorner, pc.params.x);
+  gl_Position = pc.proj * pc.view * vec4(world, 1.0);
 
-  bool pressureMode = pc.debugMode == 3;
+  bool pressureMode = int(pc.params.y + 0.5) == 3;
   vValue = pressureMode
                ? (densities[index].x - P.targetDensity) * P.pressureMultiplier
                : length(velocities[index].xyz);
   vUV = inCorner;
   vViewCenter = (pc.view * vec4(center, 1.0)).xyz;
-  vRadius = radius;
 }

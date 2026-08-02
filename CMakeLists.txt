@@ -63,14 +63,16 @@ set(SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/whitewater.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/whitewater.frag)
 
+file(GLOB SHADER_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.glsl)
+
 set(SPIRV_OUTPUTS)
 foreach(SHADER ${SHADER_SOURCES})
     get_filename_component(FNAME ${SHADER} NAME)
     set(SPV ${SHADER_OUT_DIR}/${FNAME}.spv)
     add_custom_command(
         OUTPUT ${SPV}
-        COMMAND ${GLSLC} ${SHADER} -o ${SPV}
-        DEPENDS ${SHADER}
+        COMMAND ${GLSLC} -I ${CMAKE_CURRENT_SOURCE_DIR}/shaders ${SHADER} -o ${SPV}
+        DEPENDS ${SHADER} ${SHADER_HEADERS}
         COMMENT "Compiling shader ${FNAME}")
     list(APPEND SPIRV_OUTPUTS ${SPV})
 endforeach()

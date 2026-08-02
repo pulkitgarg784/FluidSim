@@ -24,6 +24,7 @@ layout(location = 7) out vec3 vViewDirection;
 void main() {
     vec4 viewPos = pc.view * vec4(inPosition, 1.0);
     gl_Position = pc.proj * viewPos;
+
     vNormal = inNormal;
     vWorldPos = inPosition;
     vLinearDepth = -viewPos.z;
@@ -31,5 +32,5 @@ void main() {
     vDiffuse = inDiffuse;
     vSpecular = inSpecular;
     vShininess = inShininess;
-    vViewDirection = inverse(pc.view)[3].xyz - inPosition;
+    vViewDirection = -transpose(mat3(pc.view)) * pc.view[3].xyz - inPosition;
 }

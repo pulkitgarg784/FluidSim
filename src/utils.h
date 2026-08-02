@@ -10,7 +10,8 @@ using linalg::aliases::float3;
 using linalg::aliases::float4;
 using linalg::aliases::float4x4;
 
-constexpr float degreesToRadians = 3.14159265358979f / 180.0f;
+constexpr float pi = 3.14159265358979323846f;
+constexpr float degreesToRadians = pi / 180.0f;
 
 inline float3 rotateVector(float theta, const float3 &vector,
                            const float3 &axis) {

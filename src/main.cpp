@@ -22,16 +22,18 @@
 
 using namespace linalg::aliases;
 
-constexpr float PI = 3.14159265358979f;
 constexpr float mouseLookSpeed = 0.2f; // mouse look sensitivity
 constexpr float moveSpeed = 1.5f;      // keyboard movement
 constexpr float interactionRadius = 1.5f;
 constexpr float interactionStrength = 40.0f;
-constexpr float physicsTimeStep = 1 / 75.0f;
+constexpr float physicsTimeStep = 1.0f / 75.0f;
+constexpr float verticalFovDegrees = 45.0f;
 
 // width, height, length
 const float3 tankSize(8.77f, 4.20f, 2.92f);
 
+// The water starts as a column against the left wall and collapses when the
+// simulation begins.
 const float3 waterMin(-4.27f, -1.98f, -1.34f);
 const float3 waterMax(-2.19f, 1.69f, 1.34f);
 
@@ -126,6 +128,7 @@ static bool parseParticleCount(std::string_view text,
   return true;
 }
 
+// Fill the starting volume with an even grid of particles, layer by layer.
 static std::vector<float4>
 generateParticlePositions(const float3 &waterMin, const float3 &waterMax,
                           uint32_t particleCount) {
@@ -133,13 +136,13 @@ generateParticlePositions(const float3 &waterMin, const float3 &waterMax,
   const float3 waterSize = waterMax - waterMin;
   const float nominalSpacing = std::cbrt(
       (waterSize.x * waterSize.y * waterSize.z) / float(particleCount));
-  const uint32_t countX = std::max(
-      1u, static_cast<uint32_t>(std::ceil(waterSize.x / nominalSpacing)));
-  const uint32_t countZ = std::max(
-      1u, static_cast<uint32_t>(std::ceil(waterSize.z / nominalSpacing)));
+  const uint32_t countX =
+      static_cast<uint32_t>(std::ceil(waterSize.x / nominalSpacing));
+  const uint32_t countZ =
+      static_cast<uint32_t>(std::ceil(waterSize.z / nominalSpacing));
   const uint32_t particlesPerLayer = countX * countZ;
-  const uint32_t countY = std::max(
-      1u, (particleCount + particlesPerLayer - 1u) / particlesPerLayer);
+  const uint32_t countY =
+      (particleCount + particlesPerLayer - 1u) / particlesPerLayer;
   const float3 spacing(waterSize.x / float(countX), waterSize.y / float(countY),
                        waterSize.z / float(countZ));
 
@@ -196,37 +199,31 @@ int main(int argc, char **argv) {
   const float particleScale = std::cbrt(1.0f / densityRatio);
   const float smoothingRadius = 0.12f * particleScale;
   const float particleMass = 1.0f / densityRatio;
-  const float simulationDeltaT = physicsTimeStep;
   const float renderRadius = 0.068f * particleScale;
 
   const uint32_t gridX =
-      static_cast<uint32_t>(std::ceil(tankSize.x / smoothingRadius)) +
-      2u;
+      static_cast<uint32_t>(std::ceil(tankSize.x / smoothingRadius)) + 2u;
   const uint32_t gridY =
-      static_cast<uint32_t>(std::ceil(tankSize.y / smoothingRadius)) +
-      2u;
+      static_cast<uint32_t>(std::ceil(tankSize.y / smoothingRadius)) + 2u;
   const uint32_t gridZ =
-      static_cast<uint32_t>(std::ceil(tankSize.z / smoothingRadius)) +
-      2u;
+      static_cast<uint32_t>(std::ceil(tankSize.z / smoothingRadius)) + 2u;
   const uint32_t gridCellCount = gridX * gridY * gridZ;
-  const uint32_t maxGridCellCount = particleCount * 2u;
-  if (gridCellCount > maxGridCellCount) {
-    std::fprintf(stderr,
-                 "Tank grid needs %u cells, but the current particle count "
-                 "supports at most %u. Increase the particle count or use a "
-                 "smaller tank.\n",
-                 gridCellCount, maxGridCellCount);
-    return 1;
-  }
 
   std::cout << "Starting " << particleCount
             << " particles; h=" << smoothingRadius << ", grid=" << gridX << 'x'
             << gridY << 'x' << gridZ << std::endl;
 
+  vkr::RendererConfig config{};
+  config.width = width;
+  config.height = height;
+  config.title = "CS488 Final Project";
+  config.particleCount = particleCount;
+  config.whitewaterCapacity = sph::maxWhitewaterParticleCount;
+  config.gridCellCount = gridCellCount;
+
   vkr::VulkanRenderer renderer;
   try {
-    renderer.init(width, height, "CS488 Final Project", particleCount,
-                  sph::maxWhitewaterParticleCount);
+    renderer.init(config);
     if (!scenePath.empty())
       renderer.loadSceneMesh(scenePath, sceneScale);
   } catch (const std::exception &e) {
@@ -257,7 +254,7 @@ int main(int argc, char **argv) {
   params.boundsSize[0] = tankSize.x;
   params.boundsSize[1] = tankSize.y;
   params.boundsSize[2] = tankSize.z;
-  params.deltaT = simulationDeltaT;
+  params.deltaT = physicsTimeStep;
   params.smoothingRadius = smoothingRadius;
   params.particleMass = particleMass;
   params.targetDensity = sph::targetDensity;
@@ -267,11 +264,11 @@ int main(int argc, char **argv) {
   const float r2 = smoothingRadius * smoothingRadius;
   const float r5 = r2 * r2 * smoothingRadius;
   const float r9 = r2 * r2 * r2 * r2 * smoothingRadius;
-  params.densityKernelScale = 15.0f / (2.0f * PI * r5);
-  params.pressureGradientKernelScale = 15.0f / (PI * r5);
-  params.viscosityKernelScale = 315.0f / (64.0f * PI * r9);
+  params.densityKernelScale = 15.0f / (2.0f * utils::pi * r5);
+  params.pressureGradientKernelScale = 15.0f / (utils::pi * r5);
+  params.viscosityKernelScale = 315.0f / (64.0f * utils::pi * r9);
   params.numParticles = particleCount;
-  params.epsilon = sph::Epsilon;
+  params.epsilon = sph::epsilon;
   params.grid[0] = gridX;
   params.grid[1] = gridY;
   params.grid[2] = gridZ;
@@ -318,7 +315,7 @@ int main(int argc, char **argv) {
       framebufferHeight = std::max(framebufferHeight, 1);
       const float aspect = float(framebufferWidth) / float(framebufferHeight);
       const float4x4 proj =
-          utils::perspectiveVK(45.0f, aspect, 0.01f, 100.0f);
+          utils::perspectiveVK(verticalFovDegrees, aspect, 0.01f, 100.0f);
       const float4x4 view = utils::lookAt(globalEye, globalLookat, globalUp);
 
       // Shift+Left click attracts the fluid, Shift+Right click repels it.
@@ -329,13 +326,11 @@ int main(int argc, char **argv) {
       float3 interactionPoint = float3(0.0f);
       if (shiftHeld && (mouseLeftPressed || mouseRightPressed)) {
         float3 rayDir = utils::mouseRayDirection(
-            m_mouseX, m_mouseY, windowWidth, windowHeight, 45.0f, aspect,
-            globalViewDir, globalRight);
-        float3 planeNormal = -globalViewDir; // faces the camera
-        float3 planePoint = float3(0.0f);    // box centre
-        float denom = dot(rayDir, planeNormal);
+            m_mouseX, m_mouseY, windowWidth, windowHeight, verticalFovDegrees,
+            aspect, globalViewDir, globalRight);
+        float denom = dot(rayDir, -globalViewDir);
         if (std::abs(denom) > 1e-6f) {
-          float t = dot(planePoint - globalEye, planeNormal) / denom;
+          float t = dot(float3(0.0f) - globalEye, -globalViewDir) / denom;
           if (t > 0.0f) {
             interactionPoint = globalEye + rayDir * t;
             interactionStrengthSigned =
@@ -347,10 +342,9 @@ int main(int argc, char **argv) {
                               interactionStrengthSigned);
 
       const int physicsSteps =
-          physicsAccumulator >= static_cast<double>(physicsTimeStep) ? 1 : 0;
+          physicsAccumulator >= double(physicsTimeStep) ? 1 : 0;
       if (physicsSteps != 0)
-        physicsAccumulator =
-            std::fmod(physicsAccumulator, static_cast<double>(physicsTimeStep));
+        physicsAccumulator = std::fmod(physicsAccumulator, physicsTimeStep);
       renderer.drawFrame(view, proj, globalRight, camUp, globalViewDir,
                          renderRadius, physicsSteps);
     }

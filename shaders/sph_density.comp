@@ -1,62 +1,38 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
 layout(local_size_x = 256) in;
 
-layout(std430, binding = 3) buffer Densities { vec2 densities[]; };
-layout(std140, binding = 5) uniform Params {
-  vec4 gravity;
-  vec4 boundsSize;
-  float deltaT;
-  float smoothingRadius;
-  float particleMass;
-  float targetDensity;
-  float pressureMultiplier;
-  float viscosityStrength;
-  float collisionDamping;
-  float densityKernelScale;
-  float pressureGradientKernelScale;
-  float viscosityKernelScale;
-  uint numParticles;
-  float epsilon;
-  uvec4 grid;
-} P;
-layout(std430, binding = 8) readonly buffer StartIndices { uint startIndices[]; };
-layout(std430, binding = 13) readonly buffer EndIndices { uint endIndices[]; };
-layout(std430, binding = 11) readonly buffer SortedPred { vec4 sortedPred[]; };
+#include "sph_params.glsl"
 
-ivec3 gridCell(vec3 p) {
-  ivec3 c = ivec3(floor((p + 0.5 * P.boundsSize.xyz) / P.smoothingRadius)) + ivec3(1);
-  return clamp(c, ivec3(0), ivec3(P.grid.xyz) - ivec3(1));
-}
-uint cellKey(ivec3 c) {
-  return (uint(c.z) * P.grid.y + uint(c.y)) * P.grid.x + uint(c.x);
-}
+layout(std430, binding = 3) buffer Densities { vec2 densities[]; };
+layout(std430, binding = 8) readonly buffer StartIndices { uint startIndices[]; };
+layout(std430, binding = 11) readonly buffer SortedPred { vec4 sortedPred[]; };
+layout(std430, binding = 13) readonly buffer EndIndices { uint endIndices[]; };
+
+// Density uses the spiky (h - r)^2 kernel, and stops particles from collapsing into each other.
 void main() {
   uint idx = gl_GlobalInvocationID.x;
   if (idx >= P.numParticles) return;
 
   vec3 pi = sortedPred[idx].xyz;
-  ivec3 center = gridCell(pi);
-  int rowStride = int(P.grid.x);
-  int sliceStride = rowStride * int(P.grid.y);
-  int centerKey = int(cellKey(center));
-  int x0 = max(-1, -center.x);
-  int y0 = max(-1, -center.y);
-  int z0 = max(-1, -center.z);
-  int x1 = min(1, int(P.grid.x) - 1 - center.x);
-  int y1 = min(1, int(P.grid.y) - 1 - center.y);
-  int z1 = min(1, int(P.grid.z) - 1 - center.z);
   float h = P.smoothingRadius;
   float h2 = h * h;
+  float nearDensityScale = 2.0 * P.densityKernelScale / h;
   float density = 0.0;
   float nearDensity = 0.0;
-  float nearDensityScale = 2.0 * P.densityKernelScale / h;
 
-  for (int dz = z0; dz <= z1; ++dz)
-  for (int dy = y0; dy <= y1; ++dy)
-  for (int dx = x0; dx <= x1; ++dx) {
-    uint key = uint(centerKey + dz * sliceStride + dy * rowStride + dx);
+  ivec3 center = gridCell(pi);
+  int centerKey = int(cellKey(center));
+  ivec3 lo = neighbourMin(center);
+  ivec3 hi = neighbourMax(center);
+
+  for (int dz = lo.z; dz <= hi.z; ++dz)
+  for (int dy = lo.y; dy <= hi.y; ++dy)
+  for (int dx = lo.x; dx <= hi.x; ++dx) {
+    uint key = neighbourKey(centerKey, ivec3(dx, dy, dz));
     uint start = startIndices[key];
-    if (start == 0xffffffffu) continue;
+    if (start == EMPTY_CELL) continue;
     uint end = endIndices[key];
     for (uint e = start; e < end; ++e) {
       vec3 offset = sortedPred[e].xyz - pi;
@@ -68,5 +44,6 @@ void main() {
       }
     }
   }
+
   densities[idx] = max(vec2(density, nearDensity), vec2(P.epsilon));
 }
