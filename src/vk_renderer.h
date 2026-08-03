@@ -273,8 +273,6 @@ public:
     createHostBuffer(size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices.data(),
                      sceneMeshBuffer_, "scene mesh");
     sceneMeshVertexCount_ = static_cast<uint32_t>(vertices.size());
-    std::cout << "Loaded scene mesh " << resolvedPath << " ("
-              << sceneMeshVertexCount_ << " vertices)" << std::endl;
   }
 
   bool shouldClose() const { return glfwWindowShouldClose(window_); }

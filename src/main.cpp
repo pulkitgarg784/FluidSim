@@ -209,10 +209,6 @@ int main(int argc, char **argv) {
       static_cast<uint32_t>(std::ceil(tankSize.z / smoothingRadius)) + 2u;
   const uint32_t gridCellCount = gridX * gridY * gridZ;
 
-  std::cout << "Starting " << particleCount
-            << " particles; h=" << smoothingRadius << ", grid=" << gridX << 'x'
-            << gridY << 'x' << gridZ << std::endl;
-
   vkr::RendererConfig config{};
   config.width = width;
   config.height = height;

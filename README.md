@@ -25,7 +25,7 @@ Building it on Vulkan with compute shaders came out of my earlier work with Vulk
 
 - CMake 3.16 or newer
 - A C++17 compiler
-- Vulkan SDK, including `glslc`
+- [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) , including `glslc`
 - A Vulkan 1.4-capable GPU/driver with synchronization2, push descriptors, and support for 256 compute invocations per workgroup
 
 GLFW, Dear ImGui, and the Vulkan radix-sort library are included under `external/`.
