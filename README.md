@@ -192,9 +192,9 @@ Assets: `fluid_container.obj` was made for this project, and `uffizi_probe.hdr` 
 
 The algorithms used are based on the following papers:
 
-- SPH formulation and kernels: Koschier, Bender, Solenthaler and Teschner, [*SPH Techniques for the Physics Based Simulation of Fluids and Solids*](https://sph-tutorial.physics-simulation.org/pdf/SPH_Tutorial.pdf)
-- Near pressure and double density relaxation: Clavet, Beaudoin and Poulin, [*Particle-based Viscoelastic Fluid Simulation*](https://www.researchgate.net/profile/Pierre-Poulin/publication/220789321_Particle-based_viscoelastic_fluid_simulation/links/0c96051824f22359e2000000/Particle-based-viscoelastic-fluid-simulation.pdf?_tp=eyJjb250ZXh0Ijp7ImZpcnN0UGFnZSI6InB1YmxpY2F0aW9uIiwicGFnZSI6InB1YmxpY2F0aW9uIn19)
-- Screen-space surface reconstruction: Green, *Screen Space Fluid Rendering* ([NVIDIA GDC 2010](https://developer.download.nvidia.com/presentations/2010/gdc/Direct3D_Effects.pdf)).
+- SPH: Koschier, Bender, Solenthaler and Teschner, [*SPH Techniques for the Physics Based Simulation of Fluids and Solids*](https://sph-tutorial.physics-simulation.org/pdf/SPH_Tutorial.pdf)
+- Near pressure: Clavet, Beaudoin and Poulin, [*Particle-based Viscoelastic Fluid Simulation*](https://www.researchgate.net/profile/Pierre-Poulin/publication/220789321_Particle-based_viscoelastic_fluid_simulation/links/0c96051824f22359e2000000/Particle-based-viscoelastic-fluid-simulation.pdf?_tp=eyJjb250ZXh0Ijp7ImZpcnN0UGFnZSI6InB1YmxpY2F0aW9uIiwicGFnZSI6InB1YmxpY2F0aW9uIn19)
+- Screen-space surface reconstruction: *Screen Space Fluid Rendering* ([NVIDIA GDC 2010](https://developer.download.nvidia.com/presentations/2010/gdc/Direct3D_Effects.pdf)).
 - Spray, foam, and bubble classification and spawn cues: Ihmsen, Akinci, Akinci and Teschner, [*Unified spray, foam and bubbles for particle-based fluids*](https://cg.informatik.uni-freiburg.de/publications/2012_CGI_sprayFoamBubbles.pdf).
 
 ### Caveats, cautions, and assumptions
@@ -211,7 +211,7 @@ The algorithms used are based on the following papers:
 
 ## Objectives
 
-These are the objectives from the [proposal](proposal.md). [How the objectives are met](#how-the-objectives-are-met) lists the file that implements each one.
+These are the objectives from the [proposal](proposal.md):
 
 1. Implement a Smoothed Particle Hydrodynamics fluid simulation. It should calculate particle density, pressure, forces, and time integration to simulate fluid behaviour.
 2. Implement a spatial hashing structure to improve efficiency for particle search, so that we can support around 100,000 particles for our simulation. This should aim to reduce complexity from $O(n^2)$ to $O(nk)$.
