@@ -212,7 +212,7 @@ int main(int argc, char **argv) {
   vkr::RendererConfig config{};
   config.width = width;
   config.height = height;
-  config.title = "CS488 Final Project";
+  config.title = "FluidSim";
   config.particleCount = particleCount;
   config.whitewaterCapacity = sph::maxWhitewaterParticleCount;
   config.gridCellCount = gridCellCount;

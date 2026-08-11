@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(CS488 LANGUAGES CXX)
+project(FluidSim LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -79,32 +79,32 @@ endforeach()
 
 add_custom_target(shaders DEPENDS ${SPIRV_OUTPUTS})
 
-add_executable(CS488
+add_executable(FluidSim
     src/main.cpp
     src/obj_loader.cpp
     src/vk_radix_sort_impl.cpp)
-add_dependencies(CS488 shaders)
+add_dependencies(FluidSim shaders)
 
 # Keep the demo scenes and HDR environment with the build output so the
 # executable does not depend on its working directory or source checkout.
-add_custom_command(TARGET CS488 POST_BUILD
+add_custom_command(TARGET FluidSim POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/media ${CMAKE_BINARY_DIR}/media)
 
-target_include_directories(CS488 PRIVATE
+target_include_directories(FluidSim PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/external/vulkan_radix_sort/include
     ${Vulkan_INCLUDE_DIRS})
 
-target_compile_definitions(CS488 PRIVATE
+target_compile_definitions(FluidSim PRIVATE
     SHADER_DIR="${SHADER_OUT_DIR}"
     ASSET_DIR="${CMAKE_BINARY_DIR}")
 
-target_link_libraries(CS488 PRIVATE Vulkan::Vulkan imgui)
+target_link_libraries(FluidSim PRIVATE Vulkan::Vulkan imgui)
 
 if(APPLE)
     get_filename_component(VULKAN_LIBRARY_DIR "${Vulkan_LIBRARY}" DIRECTORY)
-    set_target_properties(CS488 PROPERTIES
+    set_target_properties(FluidSim PROPERTIES
         BUILD_RPATH "${VULKAN_LIBRARY_DIR}"
         INSTALL_RPATH "${VULKAN_LIBRARY_DIR}")
 endif()
